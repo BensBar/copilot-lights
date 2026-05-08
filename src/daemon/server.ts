@@ -31,11 +31,18 @@ const ReloadMessageSchema = z.object({
   kind: z.literal('reload'),
 });
 
+const FollowMessageSchema = z.object({
+  kind: z.literal('follow'),
+  /** Session id to follow, or null/omitted to clear (aggregate all). */
+  sessionId: z.string().nullable().optional(),
+});
+
 const WireMessageSchema = z.union([
   EventMessageSchema,
   QueryMessageSchema,
   SubscribeMessageSchema,
   ReloadMessageSchema,
+  FollowMessageSchema,
 ]);
 
 export interface DaemonOptions {
@@ -254,6 +261,8 @@ export class Daemon {
     adapter: { kind: string; ok: boolean; lastError: string | null };
     frame: unknown;
     uptimeMs: number;
+    followedSessionId: string | null;
+    goveeDevices: Array<{ ip: string; sku?: string; name?: string }> | null;
   } {
     const snapshot = this.aggregator.snapshot();
     const frame = this.scheduler.computeFrame();
@@ -283,6 +292,12 @@ export class Daemon {
       },
       frame,
       uptimeMs: this.now() - this.startTime,
+      followedSessionId: this.aggregator.getFollowedSession(),
+      goveeDevices:
+        this.adapter.kind === 'govee'
+          ? ((this.adapter as unknown as { discoveredDevices?: ReadonlyArray<{ ip: string; sku?: string; name?: string }> })
+              .discoveredDevices ?? []).map((d) => ({ ip: d.ip, sku: d.sku, name: d.name }))
+          : null,
     };
   }
 
@@ -374,6 +389,20 @@ export class Daemon {
               }) + '\n'
             );
           });
+      } else if (msg.kind === 'follow') {
+        const id = msg.sessionId ?? null;
+        this.aggregator.setFollowedSession(id);
+        // Push the new resolved state immediately so the bulb flips colour
+        // without waiting for the next tick or hook event.
+        this.scheduler.setState(this.aggregator.resolve());
+        this.broadcastStatus();
+        socket.end(
+          JSON.stringify({
+            kind: 'follow-result',
+            ok: true,
+            followedSessionId: id,
+          }) + '\n'
+        );
       }
     } catch (err) {
       // Malformed JSON or other parse error

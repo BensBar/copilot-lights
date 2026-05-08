@@ -86,6 +86,43 @@ class MenuBuilder: NSObject, NSMenuDelegate {
                     item.toolTip = session.id
                     menu.addItem(item)
                 }
+
+                // Follow Session submenu: pick one session to drive the
+                // light, or "All sessions" to aggregate (default).
+                menu.addItem(NSMenuItem.separator())
+                let followItem = NSMenuItem(title: "Follow Session", action: nil, keyEquivalent: "")
+                let followSubmenu = NSMenu()
+                let followedId = status.followedSessionId
+
+                let allItem = NSMenuItem(title: "All sessions (aggregate)",
+                                         action: #selector(setFollow(_:)),
+                                         keyEquivalent: "")
+                allItem.target = self
+                allItem.representedObject = NSNull()
+                allItem.state = (followedId == nil) ? .on : .off
+                followSubmenu.addItem(allItem)
+                followSubmenu.addItem(NSMenuItem.separator())
+
+                for session in sorted {
+                    let label: String
+                    if let cwd = session.cwd, !cwd.isEmpty {
+                        let home = FileManager.default.homeDirectoryForCurrentUser.path
+                        let pretty = cwd.hasPrefix(home) ? "~" + cwd.dropFirst(home.count) : cwd
+                        label = pretty
+                    } else {
+                        label = String(session.id.prefix(8)) + "…"
+                    }
+                    let mi = NSMenuItem(title: label,
+                                        action: #selector(setFollow(_:)),
+                                        keyEquivalent: "")
+                    mi.target = self
+                    mi.representedObject = session.id
+                    mi.toolTip = session.id
+                    mi.state = (session.id == followedId) ? .on : .off
+                    followSubmenu.addItem(mi)
+                }
+                followItem.submenu = followSubmenu
+                menu.addItem(followItem)
             }
             
             let adapterStatus = status.adapter.ok ? "✓" : "✗"
@@ -326,6 +363,20 @@ class MenuBuilder: NSObject, NSMenuDelegate {
         guard let cwd = sender.representedObject as? String, !cwd.isEmpty else { return }
         let url = URL(fileURLWithPath: cwd, isDirectory: true)
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    @objc private func setFollow(_ sender: NSMenuItem) {
+        // representedObject is either an NSNull (clear / aggregate-all) or
+        // the session id String to follow.
+        let target: String?
+        if sender.representedObject is NSNull {
+            target = nil
+        } else if let id = sender.representedObject as? String {
+            target = id
+        } else {
+            return
+        }
+        Task { await configStore.setFollowedSession(target) }
     }
 
     private func abbreviateHome(_ path: String) -> String {

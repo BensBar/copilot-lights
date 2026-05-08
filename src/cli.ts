@@ -513,6 +513,171 @@ program
     process.exitCode = exitCode;
   });
 
+program
+  .command('follow [sessionIdOrCwd]')
+  .description('Follow one Copilot session (the light reflects only that session). Pass --all to clear, --list to print sessions.')
+  .option('--socket <path>', 'Unix socket path')
+  .option('--all', 'Clear follow mode and aggregate all sessions')
+  .option('--list', 'List active sessions and the currently-followed one')
+  .action(async (target: string | undefined, options) => {
+    const socketPath = options.socket ?? defaultSocketPath();
+
+    // List mode
+    if (options.list) {
+      const reply = await sendToDaemon({ kind: 'query', query: 'status' }, {
+        socketPath, timeoutMs: 1500, expectReply: true,
+      });
+      if (!reply) {
+        console.error(kleur.red('daemon not responding'));
+        process.exitCode = 1;
+        return;
+      }
+      const status = JSON.parse(reply);
+      const followed = status.followedSessionId ?? null;
+      console.log(kleur.bold(`Following: ${followed ?? '(all sessions)'}`));
+      console.log();
+      for (const s of status.sessionList ?? []) {
+        const marker = s.id === followed ? kleur.green('●') : ' ';
+        console.log(`${marker} ${s.id.substring(0, 8)}…  ${kleur.dim((s.cwd ?? '').replace(homedir(), '~'))}  [${s.state}]`);
+      }
+      return;
+    }
+
+    // Clear mode
+    if (options.all || target === '--all') {
+      const reply = await sendToDaemon({ kind: 'follow', sessionId: null }, {
+        socketPath, timeoutMs: 1500, expectReply: true,
+      });
+      if (!reply) {
+        console.error(kleur.red('daemon not responding'));
+        process.exitCode = 1;
+        return;
+      }
+      console.log('Following: all sessions');
+      return;
+    }
+
+    if (!target) {
+      console.error('Pass a session id (prefix is OK), a path that matches a session cwd, --all, or --list');
+      process.exitCode = 2;
+      return;
+    }
+
+    // Resolve target → exact session id by querying status first.
+    const statusReply = await sendToDaemon({ kind: 'query', query: 'status' }, {
+      socketPath, timeoutMs: 1500, expectReply: true,
+    });
+    if (!statusReply) {
+      console.error(kleur.red('daemon not responding'));
+      process.exitCode = 1;
+      return;
+    }
+    const status = JSON.parse(statusReply);
+    const sessions: Array<{ id: string; cwd: string | null }> = status.sessionList ?? [];
+    const matches = sessions.filter((s) =>
+      s.id === target ||
+      s.id.startsWith(target) ||
+      (s.cwd && (s.cwd === target || s.cwd.endsWith('/' + target)))
+    );
+    if (matches.length === 0) {
+      console.error(kleur.red(`no session matches "${target}"`));
+      console.error('Try `copilot-lights follow --list` to see active sessions.');
+      process.exitCode = 1;
+      return;
+    }
+    if (matches.length > 1) {
+      console.error(kleur.red(`"${target}" is ambiguous (${matches.length} matches):`));
+      for (const m of matches) console.error(`  ${m.id}  ${m.cwd ?? ''}`);
+      process.exitCode = 1;
+      return;
+    }
+    const chosen = matches[0]!;
+    const reply = await sendToDaemon({ kind: 'follow', sessionId: chosen.id }, {
+      socketPath, timeoutMs: 1500, expectReply: true,
+    });
+    if (!reply) {
+      console.error(kleur.red('daemon not responding'));
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`Following: ${kleur.green(chosen.id)}  ${kleur.dim(chosen.cwd ?? '')}`);
+  });
+
+program
+  .command('govee')
+  .description('Govee adapter utilities')
+  .addCommand(
+    new Command('discover')
+      .description('Multicast-scan the local network for Govee LAN-control devices')
+      .option('--timeout <ms>', 'Discovery timeout in ms', '2500')
+      .action(async (options) => {
+        const timeoutMs = Number(options.timeout) || 2500;
+        const socketPath = defaultSocketPath();
+
+        // First, try the daemon — if it's already running on the govee
+        // adapter it owns the multicast port and standalone discovery would
+        // fail. The daemon publishes its current discovered devices in
+        // `status.goveeDevices`.
+        const statusReply = await sendToDaemon({ kind: 'query', query: 'status' }, {
+          socketPath, timeoutMs: 1500, expectReply: true,
+        });
+        if (statusReply) {
+          try {
+            const status = JSON.parse(statusReply);
+            if (status.adapter?.kind === 'govee' && Array.isArray(status.goveeDevices)) {
+              const found: Array<{ ip: string; sku?: string; name?: string }> = status.goveeDevices;
+              if (found.length === 0) {
+                console.log(kleur.yellow('Daemon is running on the Govee adapter but has not discovered any devices yet.'));
+                console.log(kleur.dim('Make sure each device has "LAN Control" enabled in the Govee Home app and is on the same subnet as this Mac.'));
+                return;
+              }
+              console.log(kleur.dim('(reading from running daemon)'));
+              console.log(kleur.bold(`Found ${found.length} Govee device(s):`));
+              console.log();
+              for (const d of found) {
+                const sku = d.sku ? kleur.cyan(d.sku) : kleur.dim('(unknown)');
+                const name = d.name ? `  "${d.name}"` : '';
+                console.log(`  ${kleur.green(d.ip.padEnd(15))} ${sku}${name}`);
+              }
+              return;
+            }
+          } catch {
+            // fall through to standalone
+          }
+        }
+
+        // Standalone scan (no daemon, or daemon is not on the govee adapter).
+        const { GoveeAdapter } = await import('./adapters/govee.js');
+        const adapter = new GoveeAdapter({ devices: [], discoveryTimeoutMs: timeoutMs });
+        try {
+          await adapter.connect();
+        } catch (err) {
+          console.error(kleur.red(`discovery failed: ${err instanceof Error ? err.message : String(err)}`));
+          process.exitCode = 1;
+          return;
+        }
+        const found: Array<{ ip: string; sku?: string; name?: string }> =
+          (adapter as unknown as { discoveredDevices?: ReadonlyArray<{ ip: string; sku?: string; name?: string }> })
+            .discoveredDevices?.slice() ?? [];
+        await adapter.close();
+        if (found.length === 0) {
+          console.log(kleur.yellow('No Govee devices responded.'));
+          console.log(kleur.dim('Make sure each device has "LAN Control" enabled in the Govee Home app and is on the same subnet as this Mac.'));
+          return;
+        }
+        console.log(kleur.bold(`Found ${found.length} Govee device(s):`));
+        console.log();
+        for (const d of found) {
+          const sku = d.sku ? kleur.cyan(d.sku) : kleur.dim('(unknown)');
+          const name = d.name ? `  "${d.name}"` : '';
+          console.log(`  ${kleur.green(d.ip.padEnd(15))} ${sku}${name}`);
+        }
+        console.log();
+        console.log(kleur.dim('Add the IPs you want to drive into ~/.copilot-lights/config.json:'));
+        console.log(kleur.dim('  "govee": { "devices": [' + found.map(d => `{"ip":"${d.ip}"}`).join(', ') + '] }'));
+      })
+  );
+
 function resolveBinaryPath(): string {
   // Prefer the user's invocation path if it ends in `copilot-lights` (i.e. the
   // installed shim or symlink). Only realpath when we have no choice — that

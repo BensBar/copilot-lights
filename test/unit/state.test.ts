@@ -1051,4 +1051,58 @@ describe('StateAggregator', () => {
       expect(agg.resolveSessionStateForId('s')).toBe(agg.resolve());
     });
   });
+
+  describe('follow-session mode', () => {
+    it('reflects only the followed session, ignoring others', () => {
+      const now = 1000;
+      const agg = new StateAggregator({ now: () => now });
+
+      // Session A is thinking.
+      agg.apply({ event: 'SessionStart', sessionId: 'a', ts: now });
+      agg.apply({ event: 'UserPromptSubmit', sessionId: 'a', ts: now });
+      agg.apply({ event: 'PreToolUse', sessionId: 'a', ts: now, toolName: 'bash' });
+      // Session B is just sitting idle.
+      agg.apply({ event: 'SessionStart', sessionId: 'b', ts: now });
+
+      // Aggregated: thinking (A wins).
+      expect(agg.resolve()).toBe('thinking');
+
+      // Follow B → ready, even though A is still thinking.
+      agg.setFollowedSession('b');
+      expect(agg.resolve()).toBe('ready');
+      expect(agg.getFollowedSession()).toBe('b');
+
+      // Follow A again → thinking.
+      agg.setFollowedSession('a');
+      expect(agg.resolve()).toBe('thinking');
+
+      // Clear → aggregated again.
+      agg.setFollowedSession(null);
+      expect(agg.resolve()).toBe('thinking');
+      expect(agg.getFollowedSession()).toBeNull();
+    });
+
+    it('falls back to aggregation when the followed session is gone', () => {
+      const now = 1000;
+      const agg = new StateAggregator({ now: () => now });
+      agg.apply({ event: 'SessionStart', sessionId: 'a', ts: now });
+      agg.apply({ event: 'UserPromptSubmit', sessionId: 'a', ts: now });
+      agg.apply({ event: 'PreToolUse', sessionId: 'a', ts: now });
+
+      agg.setFollowedSession('does-not-exist');
+      // Should not crash — falls back to global aggregation.
+      expect(agg.resolve()).toBe('thinking');
+    });
+
+    it('returns off when the followed session has ended and no others exist', () => {
+      const now = 1000;
+      const agg = new StateAggregator({ now: () => now });
+      agg.apply({ event: 'SessionStart', sessionId: 'a', ts: now });
+      agg.setFollowedSession('a');
+      expect(agg.resolve()).toBe('ready');
+
+      agg.apply({ event: 'SessionEnd', sessionId: 'a', ts: now });
+      expect(agg.resolve()).toBe('off');
+    });
+  });
 });

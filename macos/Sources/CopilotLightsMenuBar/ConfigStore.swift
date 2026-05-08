@@ -68,6 +68,22 @@ final class ConfigStore: ObservableObject {
         }
     }
 
+    /// Sends `{kind:"follow", sessionId: <id|null>}` to the daemon. Pass
+    /// `nil` to clear (aggregate all sessions).
+    func setFollowedSession(_ sessionId: String?, socketPath: String = SocketPath.resolve()) async {
+        let payload: String
+        if let id = sessionId {
+            // Conservative escape — session ids are UUIDs in practice but
+            // belt-and-suspenders this in case that ever changes.
+            let safe = id.replacingOccurrences(of: "\\", with: "\\\\")
+                         .replacingOccurrences(of: "\"", with: "\\\"")
+            payload = "{\"kind\":\"follow\",\"sessionId\":\"\(safe)\"}\n"
+        } else {
+            payload = "{\"kind\":\"follow\",\"sessionId\":null}\n"
+        }
+        _ = await sendOneShot(line: payload, socketPath: socketPath, timeoutMs: 1500)
+    }
+
     private func sendOneShot(line: String, socketPath: String, timeoutMs: UInt64) async -> String? {
         let conn = NWConnection(to: .unix(path: socketPath), using: .tcp)
         return await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in

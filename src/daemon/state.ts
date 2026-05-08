@@ -135,6 +135,10 @@ export class StateAggregator {
   private readonly thinkingHoldMs: number;
   private readonly now: () => number;
   private readonly sessions = new Map<string, SessionState>();
+  /** When set, resolve() reflects only this session instead of aggregating
+   * across all of them. Cuts cross-session noise when the user has many
+   * Copilot windows open and only cares about one. null = aggregate all. */
+  private followSessionId: string | null = null;
 
   constructor(opts?: AggregatorOptions) {
     this.errorTtlMs = opts?.errorTtlMs ?? 4000;
@@ -357,12 +361,29 @@ export class StateAggregator {
 
     if (activeSessions.length === 0) return 'off';
 
+    // Follow-session mode: report only the followed session's state. Falls
+    // back to aggregation if the followed session has ended/expired.
+    if (this.followSessionId !== null) {
+      const followed = activeSessions.find((s) => s.id === this.followSessionId);
+      if (followed) return this.resolveSessionState(followed, now);
+    }
+
     const states = activeSessions.map((s) => this.resolveSessionState(s, now));
     for (const tier of STATE_PRECEDENCE) {
       if (tier === 'off') continue; // 'off' only applies when no sessions
       if (states.includes(tier)) return tier;
     }
     return 'ready';
+  }
+
+  /** Set or clear the followed session id. Pass null to aggregate all. */
+  setFollowedSession(id: string | null): void {
+    this.followSessionId = id;
+  }
+
+  /** Currently followed session id, if any. */
+  getFollowedSession(): string | null {
+    return this.followSessionId;
   }
 
   /**

@@ -5,10 +5,10 @@ import { createConnection, type Socket } from 'node:net';
  * `status` CLI subcommand. Hard total deadline = opts.timeoutMs; never blocks longer.
  */
 export interface ClientMessage {
-  kind: 'event' | 'query';
+  kind: 'event' | 'query' | 'follow' | 'reload';
   // For 'event':
   event?: string;
-  sessionId?: string;
+  sessionId?: string | null;
   ts?: number;
   toolName?: string;
   notificationType?: string;

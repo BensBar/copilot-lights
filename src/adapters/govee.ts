@@ -128,6 +128,12 @@ export class GoveeAdapter implements LightAdapter {
   private inFlight = false;
   private pendingFrame: LightFrame | null = null;
 
+  /** Read-only view of the device list (post-connect / post-discovery).
+   * Used by the `copilot-lights govee discover` CLI to print results. */
+  get discoveredDevices(): readonly GoveeDevice[] {
+    return this.devices;
+  }
+
   constructor(cfg: z.infer<typeof GoveeConfigSchema>, opts?: GoveeAdapterOptions) {
     this.cfg = cfg;
     this.socketFactory = opts?.socketFactory ?? (() => dgram.createSocket({ type: 'udp4', reuseAddr: true }));

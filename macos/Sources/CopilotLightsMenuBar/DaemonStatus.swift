@@ -8,6 +8,9 @@ struct StatusReply: Codable {
     let adapter: AdapterInfo
     let frame: FrameInfo?
     let uptimeMs: Int
+    /// Session id currently being followed (light reflects only this session).
+    /// Nil when in aggregate mode. Optional for back-compat with older daemons.
+    let followedSessionId: String?
 }
 
 struct SessionDetail: Codable, Identifiable, Hashable {
