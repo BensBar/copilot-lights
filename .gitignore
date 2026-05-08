@@ -1,0 +1,13 @@
+node_modules
+dist
+*.tsbuildinfo
+.DS_Store
+
+# Swift / Xcode build outputs
+macos/.build/
+macos/build/
+macos/CopilotLightsMenuBar.app/
+macos/Icon.iconset.bak.*
+
+# Local test sockets
+.test-sockets/

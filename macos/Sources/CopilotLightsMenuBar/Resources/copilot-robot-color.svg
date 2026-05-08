@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bodyGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7BD0FF"/>
+      <stop offset="100%" stop-color="#2E7DFF"/>
+    </linearGradient>
+    <linearGradient id="visorGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0B1B33"/>
+      <stop offset="100%" stop-color="#1C3A66"/>
+    </linearGradient>
+    <radialGradient id="cheekGrad" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#FF8FB8" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#FF8FB8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- antenna -->
+  <rect x="30" y="4" width="4" height="9" rx="1.4" fill="#9AA8C4"/>
+  <circle cx="32" cy="5" r="3.6" fill="#FFD86B" stroke="#E0A53A" stroke-width="0.8"/>
+  <circle cx="31" cy="4" r="1.1" fill="#FFFFFF" opacity="0.85"/>
+  <!-- ears (speakers) -->
+  <rect x="3" y="28" width="6" height="14" rx="2" fill="#9AA8C4"/>
+  <rect x="55" y="28" width="6" height="14" rx="2" fill="#9AA8C4"/>
+  <circle cx="6" cy="35" r="1.2" fill="#FF6B7A"/>
+  <circle cx="58" cy="35" r="1.2" fill="#FF6B7A"/>
+  <!-- head body -->
+  <rect x="10" y="14" width="44" height="40" rx="10" fill="url(#bodyGrad)"/>
+  <rect x="10" y="14" width="44" height="40" rx="10" fill="none" stroke="#1C4FA8" stroke-width="1.5" opacity="0.55"/>
+  <!-- subtle highlight stripe -->
+  <rect x="13" y="17" width="38" height="6" rx="3" fill="#FFFFFF" opacity="0.18"/>
+  <!-- visor -->
+  <rect x="16" y="24" width="32" height="16" rx="6" fill="url(#visorGrad)"/>
+  <rect x="16" y="24" width="32" height="16" rx="6" fill="none" stroke="#0B1B33" stroke-width="1"/>
+  <!-- eyes -->
+  <circle cx="25" cy="32" r="3.6" fill="#7BFFC4"/>
+  <circle cx="39" cy="32" r="3.6" fill="#7BFFC4"/>
+  <circle cx="26" cy="31" r="1.1" fill="#FFFFFF"/>
+  <circle cx="40" cy="31" r="1.1" fill="#FFFFFF"/>
+  <!-- cheek glow -->
+  <circle cx="18" cy="46" r="4" fill="url(#cheekGrad)"/>
+  <circle cx="46" cy="46" r="4" fill="url(#cheekGrad)"/>
+  <!-- mouth -->
+  <rect x="24" y="44" width="16" height="3.4" rx="1.4" fill="#0B1B33" opacity="0.85"/>
+  <rect x="26" y="44.4" width="2.6" height="2.6" rx="0.4" fill="#7BFFC4"/>
+  <rect x="30" y="44.4" width="2.6" height="2.6" rx="0.4" fill="#FFD86B"/>
+  <rect x="34" y="44.4" width="2.6" height="2.6" rx="0.4" fill="#FF8FB8"/>
+  <!-- chin bolt -->
+  <circle cx="32" cy="52" r="1.2" fill="#9AA8C4"/>
+</svg>

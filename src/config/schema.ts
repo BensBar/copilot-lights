@@ -1,0 +1,123 @@
+import { z } from 'zod';
+
+export const StateNameSchema = z.enum(['ready', 'thinking', 'awaiting_input', 'error', 'done']);
+export type StateName = z.infer<typeof StateNameSchema>;
+
+export const EffectSchema = z.discriminatedUnion('effect', [
+  z.object({ effect: z.literal('steady') }),
+  z.object({
+    effect: z.literal('breathe'),
+    periodMs: z.number().int().positive().default(4000),
+  }),
+  z.object({
+    effect: z.literal('pulse'),
+    periodMs: z.number().int().positive().default(1500),
+    count: z.number().int().positive().optional(),
+    ttlMs: z.number().int().positive().optional(),
+  }),
+  z.object({
+    effect: z.literal('flash'),
+    count: z.number().int().positive().default(2),
+    ttlMs: z.number().int().positive().default(4000),
+  }),
+]);
+
+export const StateStyleSchema = z.object({
+  color: z.string().regex(/^#?[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/),
+  brightness: z.number().min(0).max(100).default(50),
+}).and(EffectSchema);
+
+export const HomeAssistantConfigSchema = z.object({
+  baseUrl: z.string().url(),
+  token: z.string().min(1),
+  entities: z.array(z.string().min(1)).min(1),
+});
+
+export const HueConfigSchema = z.object({
+  bridgeIp: z.string().min(1),
+  applicationKey: z.string().min(1),
+  lightIds: z.array(z.string().min(1)).min(1),
+});
+
+export const GoveeConfigSchema = z.object({
+  /** Devices known by IP. Empty array + discoveryTimeoutMs > 0 means
+   *  "discover at startup and use whatever responds". Most users will
+   *  list their devices explicitly so the daemon doesn't depend on a
+   *  multicast scan that may be filtered by the network. */
+  devices: z.array(z.object({
+    ip: z.string().min(1),
+    sku: z.string().optional(),
+    name: z.string().optional(),
+  })).default([]),
+  /** Multicast discovery scan duration. Set to 0 to disable. */
+  discoveryTimeoutMs: z.number().int().nonnegative().default(1500),
+});
+
+export const ConfigSchema = z.object({
+  adapter: z.enum(['home-assistant', 'hue', 'govee', 'mock']).default('mock'),
+  homeAssistant: HomeAssistantConfigSchema.optional(),
+  hue: HueConfigSchema.optional(),
+  govee: GoveeConfigSchema.default({ devices: [], discoveryTimeoutMs: 1500 }),
+  states: z.record(StateNameSchema, StateStyleSchema).default({}),
+  transitionMs: z.number().int().nonnegative().default(600),
+  restoreOnExit: z.boolean().default(true),
+  errorTtlMs: z.number().int().positive().default(4000),
+  doneTtlMs: z.number().int().positive().default(1500),
+  socketPath: z.string().optional(),
+  /**
+   * Optional HTTP listener bound to 127.0.0.1. Off by default. When set,
+   * the daemon also accepts the same wire JSON over `POST /event` and
+   * returns status from `GET /status`. Useful for driving the daemon from
+   * sources that can't speak Unix sockets (VS Code extensions, webhook
+   * receivers, scripts on other hosts via SSH-tunneled localhost).
+   * Always loopback-only; do not expose externally.
+   */
+  http: z.object({
+    port: z.number().int().min(0).max(65535),
+    /** Optional shared-secret. If set, requests must send `Authorization: Bearer <token>`. */
+    token: z.string().min(1).optional(),
+  }).optional(),
+}).refine((c) => c.adapter !== 'home-assistant' || !!c.homeAssistant, {
+  message: 'adapter "home-assistant" requires a "homeAssistant" block',
+}).refine((c) => c.adapter !== 'hue' || !!c.hue, {
+  message: 'adapter "hue" requires a "hue" block',
+});
+
+export type CopilotLightsConfig = z.infer<typeof ConfigSchema>;
+
+export const DEFAULT_STATE_STYLES: Record<StateName, z.infer<typeof StateStyleSchema>> = {
+  ready: {
+    color: '#4ade80',
+    brightness: 30,
+    effect: 'steady',
+  },
+  thinking: {
+    color: '#d946ef',
+    brightness: 55,
+    effect: 'steady',
+  },
+  awaiting_input: {
+    color: '#fb923c',
+    brightness: 75,
+    effect: 'steady',
+  },
+  error: {
+    color: '#ef4444',
+    brightness: 85,
+    effect: 'flash',
+    count: 2,
+    ttlMs: 4000,
+  },
+  done: {
+    color: '#a3e635',
+    brightness: 70,
+    effect: 'steady',
+  },
+};
+
+export function resolveStateStyle(
+  state: StateName,
+  cfg: CopilotLightsConfig
+): z.infer<typeof StateStyleSchema> {
+  return cfg.states[state] ?? DEFAULT_STATE_STYLES[state];
+}

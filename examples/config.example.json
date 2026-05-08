@@ -1,0 +1,24 @@
+{
+  "adapter": "home-assistant",
+  "homeAssistant": {
+    "baseUrl": "http://homeassistant.local:8123",
+    "token": "env:HASS_TOKEN",
+    "entities": ["light.office_strip", "light.desk_lamp"]
+  },
+  "hue": {
+    "bridgeIp": "192.168.1.42",
+    "applicationKey": "env:HUE_APPLICATION_KEY",
+    "lightIds": ["00000000-0000-0000-0000-000000000001"]
+  },
+  "states": {
+    "ready":          { "color": "#7ee787", "brightness": 25, "effect": "steady"   },
+    "thinking":       { "color": "#58a6ff", "brightness": 40, "effect": "breathe", "periodMs": 4000 },
+    "awaiting_input": { "color": "#f0b429", "brightness": 60, "effect": "pulse",   "periodMs": 1500 },
+    "error":          { "color": "#f85149", "brightness": 80, "effect": "flash",   "count": 2, "ttlMs": 4000 },
+    "done":           { "color": "#7ee787", "brightness": 70, "effect": "pulse",   "count": 1, "ttlMs": 1500 }
+  },
+  "transitionMs": 600,
+  "restoreOnExit": true,
+  "errorTtlMs": 4000,
+  "doneTtlMs": 1500
+}
