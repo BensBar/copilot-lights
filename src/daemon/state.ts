@@ -458,17 +458,16 @@ export class StateAggregator {
     for (const s of activeSessions) {
       const isThinking = s.activeTools > 0 || s.activeSubagents > 0 || s.pendingTurns > 0;
       const hasInputFlag = s.awaitingPermission || s.hasAttentionNotification;
-      // Decay on overall event silence (lastEventTs), not just tool silence.
-      // Reasoning: Stop / PostToolUse / UserPromptSubmit all bump lastEventTs,
-      // so as long as ANY hook is still firing the session is alive. Once
-      // every hook has been quiet for `thinkingIdleTtlMs` AND we've seen at
-      // least one tool ever (precondition: lastToolEventTs is defined, so
-      // pre-first-tool think time is never decayed), any non-zero counters
-      // are almost certainly leaked from a missed cleanup hook (Stop fired
-      // under a different session id, PostToolUse dropped, etc.).
+      // Key off `lastToolEventTs` (PreToolUse / PostToolUse / SubagentStart /
+      // SubagentStop / UserPromptSubmit) rather than `lastEventTs`. Copilot
+      // CLI fires Notification hooks while the agent is between turns; those
+      // bump lastEventTs but are not real work, so using lastEventTs here
+      // means decay never fires for a session that's only receiving idle
+      // pings. Using lastToolEventTs lets decay actually trip 30s after the
+      // last tool ran, which is the symptom we want to clear.
       const isStale =
         s.lastToolEventTs !== undefined &&
-        now - s.lastEventTs >= this.thinkingIdleTtlMs;
+        now - s.lastToolEventTs >= this.thinkingIdleTtlMs;
       if ((isThinking || hasInputFlag) && isStale) {
         s.activeTools = 0;
         s.activeSubagents = 0;
