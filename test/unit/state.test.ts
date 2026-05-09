@@ -414,6 +414,41 @@ describe('StateAggregator', () => {
       expect(agg.resolve()).toBe('thinking');
     });
 
+    it('reordered PermissionRequest (older than last tool) is suppressed', () => {
+      // Hook subprocesses are fire-and-forget; arrival order at the daemon
+      // can differ from chronological order. A PermissionRequest with a
+      // timestamp older than the session's most recent PreToolUse /
+      // PostToolUse must not pin awaitingPermission to true — that
+      // permission was already granted, the tool already ran, and stale
+      // PermissionRequest reorderings would otherwise stick the bulb on
+      // 'awaiting_input' (or hold 'thinking' via the grace window) forever.
+      let now = 1000;
+      const agg = new StateAggregator({ now: () => now, permissionGraceMs: 100 });
+
+      agg.apply({ event: 'SessionStart', sessionId: 's1', ts: now });
+      agg.apply({ event: 'UserPromptSubmit', sessionId: 's1', ts: now });
+
+      // Chronological order: PermissionRequest @ t=1000, PreToolUse @ t=1010,
+      // PostToolUse @ t=1020. Daemon receives them in REVERSE arrival order
+      // (PostToolUse first, then PreToolUse, then the stale
+      // PermissionRequest last). Counters should still settle to idle.
+      agg.apply({ event: 'PostToolUse', sessionId: 's1', ts: 1020 });
+      agg.apply({ event: 'PreToolUse', sessionId: 's1', ts: 1010 });
+      agg.apply({ event: 'PermissionRequest', sessionId: 's1', ts: 1000 });
+
+      now = 1500; // past grace window
+      // pendingTurns is still 1 from UserPromptSubmit, so it stays 'thinking'
+      // — but crucially it must NOT resolve to 'awaiting_input' because the
+      // permission was already granted in the past.
+      expect(agg.resolve()).toBe('thinking');
+
+      // Stop fully ends the turn. Without the reorder guard, the lingering
+      // awaitingPermission flag would have flipped this to 'awaiting_input'.
+      agg.apply({ event: 'Stop', sessionId: 's1', ts: now });
+      now += 2000; // past doneTtl
+      expect(agg.resolve()).toBe('ready');
+    });
+
     it('PermissionRequest does NOT flicker awaiting_input within grace window (autopilot auto-approve)', () => {
       let now = 1000;
       const agg = new StateAggregator({ now: () => now, permissionGraceMs: 600 });

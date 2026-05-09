@@ -325,6 +325,20 @@ export class StateAggregator {
         break;
 
       case 'PermissionRequest':
+        // Hook events are fire-and-forget subprocesses; their arrival order
+        // at the daemon depends on subprocess startup time, not chronology.
+        // A PermissionRequest that logically precedes a PreToolUse can land
+        // AFTER it, which would otherwise pin awaitingPermission to true
+        // forever (PostToolUse already came and went). Suppress the flag
+        // when this PermissionRequest's own timestamp is older than the
+        // session's most recent tool event — that means the permission
+        // was already granted and a Pre/PostToolUse pair has since run.
+        if (
+          session.lastToolEventTs !== undefined &&
+          ts < session.lastToolEventTs
+        ) {
+          break;
+        }
         // Only set the timestamp on the rising edge (false → true). If
         // multiple PermissionRequests fire while one is still in flight,
         // we want the grace window to start from the FIRST request, not
