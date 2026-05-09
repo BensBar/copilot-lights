@@ -414,6 +414,86 @@ describe('StateAggregator', () => {
       expect(agg.resolve()).toBe('thinking');
     });
 
+    it('reordered PermissionRequest arriving after Stop is suppressed', () => {
+      // Real-world race: Copilot CLI fires hooks in chronological order
+      //   PermissionRequest (chrono ts=1000)
+      //   PreToolUse        (chrono ts=1010)
+      //   PostToolUse       (chrono ts=1020)
+      //   Stop              (chrono ts=1100)
+      // but the PermissionRequest hook subprocess can be slow to spawn /
+      // read stdin, so the daemon receives them out of order — Stop arrives
+      // first, then a stale PR with a payload.timestamp that may have been
+      // assigned at subprocess spawn time (so its ts can land *between*
+      // PostToolUse and Stop, defeating the "ts < lastToolEventTs" guard).
+      // The Stop guard catches this: any PR with ts < lastDoneTs is stale.
+      let now = 2000;
+      const agg = new StateAggregator({
+        now: () => now,
+        permissionGraceMs: 100,
+        doneTtlMs: 1500,
+      });
+
+      agg.apply({ event: 'SessionStart', sessionId: 's1', ts: 1000 });
+      agg.apply({ event: 'UserPromptSubmit', sessionId: 's1', ts: 1000 });
+      agg.apply({ event: 'PreToolUse', sessionId: 's1', ts: 1010 });
+      agg.apply({ event: 'PostToolUse', sessionId: 's1', ts: 1020 });
+      agg.apply({ event: 'Stop', sessionId: 's1', ts: 1100 });
+
+      // Within doneTtl right after Stop → 'done'.
+      now = 1200;
+      expect(agg.resolve()).toBe('done');
+
+      // Stale PR finally lands — payload.timestamp landed between PostT
+      // and Stop (e.g., 1050) but the turn is over.
+      agg.apply({ event: 'PermissionRequest', sessionId: 's1', ts: 1050 });
+
+      // Must still be 'done' (eventually 'ready') — NOT 'awaiting_input'.
+      expect(agg.resolve()).toBe('done');
+
+      now = 3000; // past doneTtl
+      expect(agg.resolve()).toBe('ready');
+    });
+
+    it('reordered PermissionRequest (older than last tool) is suppressed', () => {
+      // Real-world race: Copilot CLI fires hooks in chronological order
+      //   PermissionRequest (chrono ts=1000)
+      //   PreToolUse        (chrono ts=1010)
+      //   PostToolUse       (chrono ts=1020)
+      //   Stop              (chrono ts=1100)
+      // but the PermissionRequest hook subprocess can be slow to spawn /
+      // read stdin, so the daemon receives them out of order — Stop arrives
+      // first, then a stale PR with a payload.timestamp that may have been
+      // assigned at subprocess spawn time (so its ts can land *between*
+      // PostToolUse and Stop, defeating the "ts < lastToolEventTs" guard).
+      // The Stop guard catches this: any PR with ts < lastDoneTs is stale.
+      let now = 2000;
+      const agg = new StateAggregator({
+        now: () => now,
+        permissionGraceMs: 100,
+        doneTtlMs: 1500,
+      });
+
+      agg.apply({ event: 'SessionStart', sessionId: 's1', ts: 1000 });
+      agg.apply({ event: 'UserPromptSubmit', sessionId: 's1', ts: 1000 });
+      agg.apply({ event: 'PreToolUse', sessionId: 's1', ts: 1010 });
+      agg.apply({ event: 'PostToolUse', sessionId: 's1', ts: 1020 });
+      agg.apply({ event: 'Stop', sessionId: 's1', ts: 1100 });
+
+      // Within doneTtl right after Stop → 'done'.
+      now = 1200;
+      expect(agg.resolve()).toBe('done');
+
+      // Stale PR finally lands — payload.timestamp landed between PostT
+      // and Stop (e.g., 1050) but the turn is over.
+      agg.apply({ event: 'PermissionRequest', sessionId: 's1', ts: 1050 });
+
+      // Must still be 'done' (eventually 'ready') — NOT 'awaiting_input'.
+      expect(agg.resolve()).toBe('done');
+
+      now = 3000; // past doneTtl
+      expect(agg.resolve()).toBe('ready');
+    });
+
     it('reordered PermissionRequest (older than last tool) is suppressed', () => {
       // Hook subprocesses are fire-and-forget; arrival order at the daemon
       // can differ from chronological order. A PermissionRequest with a

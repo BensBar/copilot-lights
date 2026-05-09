@@ -329,14 +329,30 @@ export class StateAggregator {
         // at the daemon depends on subprocess startup time, not chronology.
         // A PermissionRequest that logically precedes a PreToolUse can land
         // AFTER it, which would otherwise pin awaitingPermission to true
-        // forever (PostToolUse already came and went). Suppress the flag
-        // when this PermissionRequest's own timestamp is older than the
-        // session's most recent tool event — that means the permission
-        // was already granted and a Pre/PostToolUse pair has since run.
+        // forever (PostToolUse already came and went). Two-layer guard:
+        //
+        // 1. Timestamp guard: if this PR's own ts is older than the session's
+        //    most recent tool event, it's a reorder — drop it.
+        // 2. Idle guard: a permission is only meaningful while the agent is
+        //    actually doing something (pendingTurns > 0 OR an active tool /
+        //    subagent is in flight). If the session is fully idle — Stop has
+        //    fired, no tool is running, no subagent is up — any PR arriving
+        //    now is stale (its turn already ended). Drop. This catches the
+        //    case where Copilot CLI stamps payload.timestamp at subprocess
+        //    spawn time rather than at agent-decision time, so the
+        //    timestamp-only guard alone misses some reorders.
         if (
           session.lastToolEventTs !== undefined &&
           ts < session.lastToolEventTs
         ) {
+          break;
+        }
+        // Stop guard: if a Stop has already fired with a timestamp newer
+        // than this PR, the turn this PR belongs to already ended. Drop.
+        // This catches the case where Copilot CLI stamps payload.timestamp
+        // at subprocess spawn time rather than agent-decision time, so the
+        // timestamp-vs-tool-event check alone misses some reorders.
+        if (session.lastDoneTs !== undefined && ts < session.lastDoneTs) {
           break;
         }
         // Only set the timestamp on the rising edge (false → true). If
