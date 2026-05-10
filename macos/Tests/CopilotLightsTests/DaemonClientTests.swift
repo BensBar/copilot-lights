@@ -1,7 +1,7 @@
 import XCTest
 import Network
 import AppKit
-@testable import CopilotLightsMenuBar
+@testable import CopilotLights
 
 final class DaemonClientTests: XCTestCase {
     func testCopilotMarkSVGExists() {
@@ -13,7 +13,7 @@ final class DaemonClientTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources")
-            .appendingPathComponent("CopilotLightsMenuBar")
+            .appendingPathComponent("CopilotLights")
             .appendingPathComponent("Resources")
             .appendingPathComponent("copilot-mark.svg")
         

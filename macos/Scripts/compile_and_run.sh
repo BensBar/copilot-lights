@@ -3,9 +3,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "${ROOT_DIR}/version.env" ]]; then
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/version.env"
+fi
 APP_NAME=${APP_NAME:-MyApp}
-APP_BUNDLE="${ROOT_DIR}/${APP_NAME}.app"
-APP_PROCESS_PATTERN="${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
+BUNDLE_NAME=${BUNDLE_NAME:-$APP_NAME}
+APP_BUNDLE="${ROOT_DIR}/${BUNDLE_NAME}.app"
+APP_PROCESS_PATTERN="${BUNDLE_NAME}.app/Contents/MacOS/${APP_NAME}"
 DEBUG_PROCESS_PATTERN="${ROOT_DIR}/.build/debug/${APP_NAME}"
 RELEASE_PROCESS_PATTERN="${ROOT_DIR}/.build/release/${APP_NAME}"
 RUN_TESTS=0

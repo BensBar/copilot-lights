@@ -107,7 +107,7 @@ final class CopilotMarkAsset {
                 return img
             }
         }
-        let bundleName = "CopilotLightsMenuBar_CopilotLightsMenuBar.bundle"
+        let bundleName = "CopilotLights_CopilotLights.bundle"
         if let bundleURL = Bundle.main.resourceURL?.appendingPathComponent(bundleName),
            let bundle = Bundle(url: bundleURL),
            let url = bundle.url(forResource: "copilot-mark", withExtension: "svg") {

@@ -34,10 +34,26 @@ and talks to your lights.
 
 ## Install
 
-> **Status:** v0.1 — daemon, hook bridge, both adapters, install/uninstall, status, and autostart unit generation are implemented.
+### One-line install (macOS / Linux)
 
 ```bash
-# from a checkout (npm publish hasn't happened yet)
+curl -fsSL https://raw.githubusercontent.com/BensBar/copilot-lights/main/install.sh | bash
+```
+
+What it does:
+
+1. Clones the repo into `~/.copilot-lights/src` (idempotent — re-run to upgrade).
+2. Builds and links the `copilot-lights` daemon/CLI onto your PATH.
+3. **macOS only** — builds the **Copilot Lights** menubar app, installs it to `/Applications`, and registers it for Launch at Login.
+4. Wires the Copilot CLI hooks (`copilot-lights install`).
+5. Enables the daemon's autostart unit.
+6. Runs `copilot-lights doctor` so you can see anything that needs attention.
+
+Skip parts via env vars: `SKIP_MENUBAR=1`, `SKIP_AUTOSTART=1`. After install, drop your light adapter config into `~/.copilot-lights/config.json` (see [Configure](#configure) below).
+
+### Manual install (from a checkout)
+
+```bash
 cd copilot-lights
 npm ci && npm run build
 npm link                              # exposes `copilot-lights` on your PATH
@@ -51,16 +67,16 @@ $EDITOR ~/.copilot-lights/config.json
 copilot-lights install                # idempotent; safe to re-run
 
 # verify
-copilot-lights daemon &               # or use `enable-autostart` (see below)
+copilot-lights daemon &               # or use `autostart enable` (see below)
 copilot-lights status
+copilot-lights doctor                 # full health check
 ```
 
 ### Optional autostart
 
 ```bash
-copilot-lights enable-autostart       # writes a launchd plist (macOS) or systemd --user unit (Linux)
-# follow the printed `launchctl load -w …` / `systemctl --user enable --now …` instructions
-copilot-lights disable-autostart      # remove the unit file
+copilot-lights autostart enable       # writes a launchd plist (macOS) or systemd --user unit (Linux)
+copilot-lights autostart disable      # remove the unit file
 ```
 
 ### Hue first-run pairing
@@ -173,9 +189,8 @@ plus an optional **floating desktop widget**.
 
 ```bash
 cd copilot-lights/macos
-APP_NAME=CopilotLightsMenuBar BUNDLE_ID=com.copilot-lights.menubar \
-  MENU_BAR_APP=1 SIGNING_MODE=adhoc bash Scripts/package_app.sh release
-open CopilotLightsMenuBar.app
+bash Scripts/package_app.sh release   # reads macos/version.env (APP_NAME=CopilotLights, BUNDLE_NAME="Copilot Lights")
+open "Copilot Lights.app"
 ```
 
 From the menu bar icon → **Settings…** you can:

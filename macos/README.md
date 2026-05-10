@@ -1,4 +1,4 @@
-# Copilot Lights Menu Bar
+# Copilot Lights — macOS app
 
 A macOS menu bar app that displays the current state of the copilot-lights daemon. Shows a tinted Copilot robot mark that mirrors the color and brightness of your smart lights as they respond to Copilot CLI activity.
 
@@ -16,11 +16,15 @@ Built using the battle-tested macos-spm-app-packaging skill by Dimillian (https:
 ```bash
 cd macos
 ./Scripts/package_app.sh release
-cp -R CopilotLightsMenuBar.app /Applications/
-open /Applications/CopilotLightsMenuBar.app
+cp -R "Copilot Lights.app" /Applications/
+open "/Applications/Copilot Lights.app"
 ```
 
-Launch at Login: System Settings > General > Login Items, add CopilotLightsMenuBar.app
+Launch at Login: System Settings > General > Login Items, add `Copilot Lights.app`.
+
+> Easier: from the repo root run the one-liner installer documented in the
+> top-level README — it builds the app, copies it to `/Applications`, and
+> registers it for Launch at Login automatically.
 
 ## Development
 
@@ -37,12 +41,12 @@ ARCHES="arm64 x86_64" ./Scripts/package_app.sh release
 
 ```
 macos/
-├── version.env
+├── version.env                       # APP_NAME=CopilotLights, BUNDLE_NAME="Copilot Lights"
 ├── Scripts/
 │   ├── package_app.sh
 │   ├── compile_and_run.sh
 │   └── launch.sh
-├── Sources/CopilotLightsMenuBar/
+├── Sources/CopilotLights/
 │   ├── App.swift
 │   ├── AppDelegate.swift
 │   ├── StatusItemController.swift
@@ -51,7 +55,7 @@ macos/
 │   ├── SocketPath.swift
 │   ├── Menu.swift
 │   └── Resources/copilot-mark.svg
-└── Tests/CopilotLightsMenuBarTests/
+└── Tests/CopilotLightsTests/
 ```
 
 ## Troubleshooting

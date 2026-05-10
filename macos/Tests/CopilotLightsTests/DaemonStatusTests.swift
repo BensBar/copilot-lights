@@ -1,5 +1,5 @@
 import XCTest
-@testable import CopilotLightsMenuBar
+@testable import CopilotLights
 
 final class DaemonStatusTests: XCTestCase {
     private func decode(_ json: String) throws -> StatusReply {

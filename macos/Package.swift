@@ -2,22 +2,22 @@
 import PackageDescription
 
 let package = Package(
-    name: "CopilotLightsMenuBar",
+    name: "CopilotLights",
     platforms: [.macOS(.v13)],
     products: [
-        .executable(name: "CopilotLightsMenuBar", targets: ["CopilotLightsMenuBar"])
+        .executable(name: "CopilotLights", targets: ["CopilotLights"])
     ],
     targets: [
         .executableTarget(
-            name: "CopilotLightsMenuBar",
+            name: "CopilotLights",
             dependencies: [],
-            path: "Sources/CopilotLightsMenuBar",
+            path: "Sources/CopilotLights",
             resources: [.process("Resources")]
         ),
         .testTarget(
-            name: "CopilotLightsMenuBarTests",
-            dependencies: ["CopilotLightsMenuBar"],
-            path: "Tests/CopilotLightsMenuBarTests"
+            name: "CopilotLightsTests",
+            dependencies: ["CopilotLights"],
+            path: "Tests/CopilotLightsTests"
         )
     ]
 )

@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_NAME=${APP_NAME:-MyApp}
-APP_PATH="$PROJECT_ROOT/${APP_NAME}.app"
+BUNDLE_NAME=${BUNDLE_NAME:-$APP_NAME}
+APP_PATH="$PROJECT_ROOT/${BUNDLE_NAME}.app"
 
 echo "==> Killing existing ${APP_NAME} instances"
 pkill -x "$APP_NAME" || pkill -f "${APP_NAME}.app" || true

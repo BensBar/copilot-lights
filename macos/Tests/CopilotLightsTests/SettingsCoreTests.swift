@@ -1,5 +1,5 @@
 import XCTest
-@testable import CopilotLightsMenuBar
+@testable import CopilotLights
 
 final class SettingsCoreTests: XCTestCase {
 
