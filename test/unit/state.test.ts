@@ -1167,6 +1167,70 @@ describe('StateAggregator', () => {
     });
   });
 
+  describe('subagent merging (Anthropic toolu_ ids)', () => {
+    it('routes toolu_-shaped subagent events into the parent session sharing the same cwd', () => {
+      const now = 1000;
+      const agg = new StateAggregator({ now: () => now });
+
+      // Real parent Copilot session (UUID-shaped) doing work in /repo.
+      agg.apply({ event: 'SessionStart', sessionId: 'parent-uuid-aaa', ts: now, cwd: '/repo' });
+      agg.apply({ event: 'UserPromptSubmit', sessionId: 'parent-uuid-aaa', ts: now, cwd: '/repo' });
+
+      // Subagents fire hook events under their tool-use id, not the parent
+      // UUID. Without merging, three subagents → three "sessions". With
+      // merging, they all roll up into 'parent-uuid-aaa'.
+      agg.apply({ event: 'PreToolUse', sessionId: 'toolu_01abc', ts: now, cwd: '/repo', toolName: 'grep' });
+      agg.apply({ event: 'PreToolUse', sessionId: 'toolu_02def', ts: now, cwd: '/repo', toolName: 'view' });
+      agg.apply({ event: 'PreToolUse', sessionId: 'toolu_03ghi', ts: now, cwd: '/repo', toolName: 'bash' });
+
+      const snap = agg.snapshot();
+      // Only the parent should appear — the three toolu_* events merged in.
+      expect(snap.sessions.length).toBe(1);
+      expect(snap.sessions[0]?.id).toBe('parent-uuid-aaa');
+      expect(snap.sessions[0]?.activeTools).toBe(3);
+      expect(snap.state).toBe('thinking');
+    });
+
+    it('finishing all subagents lets the parent decay normally', () => {
+      let now = 1000;
+      const agg = new StateAggregator({ now: () => now, doneTtlMs: 1500 });
+
+      agg.apply({ event: 'SessionStart', sessionId: 'parent-uuid', ts: now, cwd: '/repo' });
+      agg.apply({ event: 'UserPromptSubmit', sessionId: 'parent-uuid', ts: now, cwd: '/repo' });
+      agg.apply({ event: 'PreToolUse', sessionId: 'toolu_01abc', ts: now, cwd: '/repo', toolName: 'grep' });
+      agg.apply({ event: 'PreToolUse', sessionId: 'toolu_02def', ts: now, cwd: '/repo', toolName: 'view' });
+      expect(agg.resolve()).toBe('thinking');
+
+      // Subagents complete (firing PostToolUse under their toolu_ ids).
+      now += 100;
+      agg.apply({ event: 'PostToolUse', sessionId: 'toolu_01abc', ts: now, cwd: '/repo' });
+      agg.apply({ event: 'PostToolUse', sessionId: 'toolu_02def', ts: now, cwd: '/repo' });
+
+      // Parent itself completes.
+      now += 100;
+      agg.apply({ event: 'Stop', sessionId: 'parent-uuid', ts: now, cwd: '/repo' });
+
+      // Within doneTtl → done; after that → ready. NOT ever stuck at thinking
+      // because of leaked toolu_ sessions.
+      expect(agg.resolve()).toBe('done');
+      now += 2000;
+      expect(agg.resolve()).toBe('ready');
+    });
+
+    it('toolu_ event without a parent session falls back to a cwd-keyed bucket (so it ages out)', () => {
+      const now = 1000;
+      const agg = new StateAggregator({ now: () => now });
+
+      // No parent session exists yet — daemon was started after the parent.
+      agg.apply({ event: 'PreToolUse', sessionId: 'toolu_01orphan', ts: now, cwd: '/orphan-repo', toolName: 'bash' });
+
+      const snap = agg.snapshot();
+      // Bucketed under _cwd:/orphan-repo, NOT toolu_01orphan.
+      expect(snap.sessions.length).toBe(1);
+      expect(snap.sessions[0]?.id).toBe('_cwd:/orphan-repo');
+    });
+  });
+
   describe('follow-session mode', () => {
     it('reflects only the followed session, ignoring others', () => {
       const now = 1000;

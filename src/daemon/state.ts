@@ -27,6 +27,14 @@ export interface HookMessage {
   cwd?: string;
 }
 
+/**
+ * Anthropic tool-use ids look like `toolu_01GrPLkd5dR4VCmfF1m9KJux`. When
+ * Copilot CLI's research / Task subagents emit hooks they identify themselves
+ * with their tool-use id, not their parent session's UUID. Matching this
+ * shape lets the aggregator merge those events back into the parent.
+ */
+const TOOLU_SESSION_RE = /^toolu_[A-Za-z0-9]+$/;
+
 export interface AggregatorOptions {
   errorTtlMs?: number;
   doneTtlMs?: number;
@@ -152,8 +160,34 @@ export class StateAggregator {
 
   /** Apply one hook message. Idempotent on duplicates with same ts. */
   apply(msg: HookMessage): void {
-    const sessionId = msg.sessionId ?? '_anon';
+    let sessionId = msg.sessionId ?? '_anon';
     const ts = msg.ts ?? this.now();
+
+    // Subagent merging. Copilot CLI (Anthropic tool-use protocol) emits
+    // hook events from spawned Task subagents under their tool-use id
+    // (e.g. `toolu_01GrPLkd5dR4VCmfF1m9KJux`) rather than the parent
+    // Copilot session's UUID. Without merging, each Task subagent shows
+    // up as its own "session" in the aggregator — which both inflates the
+    // session count and produces flickery global states (when all parent-
+    // session counters momentarily zero between user prompts but a long-
+    // running Task subagent in the same cwd is still doing work, the
+    // parent shows ready/done while the subagent shows thinking, and the
+    // tween between them looks like green/blue churn).
+    //
+    // Heuristic: any session id matching the Anthropic tool-use prefix is
+    // assumed to be a Task subagent and is routed into the most-recently-
+    // active "real" session (UUID-shaped) sharing the same cwd. If no
+    // suitable parent exists yet, the event is bucketed under a synthetic
+    // `_cwd:<path>` session so it still ages out via the normal idle TTL
+    // instead of leaking forever.
+    if (TOOLU_SESSION_RE.test(sessionId) && msg.event !== 'SessionStart') {
+      const parent = this.findParentSessionForCwd(msg.cwd);
+      if (parent) {
+        sessionId = parent;
+      } else if (msg.cwd) {
+        sessionId = `_cwd:${msg.cwd}`;
+      }
+    }
 
     if (msg.event === 'SessionEnd') {
       this.sessions.delete(sessionId);
@@ -581,4 +615,26 @@ export class StateAggregator {
     }
     return result;
   }
+
+  /**
+   * Find the most-recently-active "real" parent session for the given cwd.
+   * A parent is any session whose id is NOT a tool-use id and whose cwd
+   * matches. Used to merge Task-subagent hook events back into the parent
+   * Copilot session so a single user turn renders as a single thinking
+   * state rather than a fan-out of N concurrent sessions.
+   */
+  private findParentSessionForCwd(cwd: string | undefined): string | null {
+    if (!cwd) return null;
+    let best: { id: string; ts: number } | null = null;
+    for (const [id, session] of this.sessions) {
+      if (TOOLU_SESSION_RE.test(id)) continue;
+      if (id.startsWith('_cwd:')) continue;
+      if (session.cwd !== cwd) continue;
+      if (!best || session.lastEventTs > best.ts) {
+        best = { id, ts: session.lastEventTs };
+      }
+    }
+    return best?.id ?? null;
+  }
 }
+
