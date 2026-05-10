@@ -16,7 +16,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         statusItemController = StatusItemController(daemonClient: daemonClient, configStore: configStore)
-        menuBuilder = MenuBuilder(daemonClient: daemonClient, configStore: configStore)
+        menuBuilder = MenuBuilder(daemonClient: daemonClient, configStore: configStore, ui: uiSettings)
         floatingController = FloatingWindowController(daemonClient: daemonClient, ui: uiSettings, configStore: configStore)
 
         statusItemController.setup()

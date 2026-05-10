@@ -5,11 +5,13 @@ import Foundation
 class MenuBuilder: NSObject, NSMenuDelegate {
     private let daemonClient: DaemonClient
     private let configStore: ConfigStore
+    private let ui: UISettings
     private var currentStatus: PollResult = .offline
 
-    init(daemonClient: DaemonClient, configStore: ConfigStore) {
+    init(daemonClient: DaemonClient, configStore: ConfigStore, ui: UISettings) {
         self.daemonClient = daemonClient
         self.configStore = configStore
+        self.ui = ui
         super.init()
 
         Task {
@@ -65,6 +67,11 @@ class MenuBuilder: NSObject, NSMenuDelegate {
             // bullet matching the session's resolved state, so the user can
             // see at a glance why the global aggregate (the bulb) is what it
             // is when multiple Copilot windows are running.
+            //
+            // Each row is *clickable to toggle Follow* — a check appears
+            // beside the followed session and the bulb tracks only that
+            // session's state. Hold ⌥ Option on the row to reveal the
+            // session's working directory in Finder instead.
             if !list.isEmpty {
                 // Active sessions first (newest activity first within each
                 // group), idle sessions last. Keeps the noisy / interesting
@@ -75,54 +82,46 @@ class MenuBuilder: NSObject, NSMenuDelegate {
                     if aIdle != bIdle { return !aIdle }
                     return a.lastEventTs > b.lastEventTs
                 }
-                for session in sorted {
-                    let item = NSMenuItem(title: "",
-                                          action: #selector(revealSessionCwd(_:)),
-                                          keyEquivalent: "")
-                    item.attributedTitle = sessionRowAttributedTitle(session, nowMs: nowMs)
-                    item.representedObject = session.cwd
-                    item.target = self
-                    item.isEnabled = (session.cwd != nil)
-                    item.toolTip = session.id
-                    menu.addItem(item)
-                }
-
-                // Follow Session submenu: pick one session to drive the
-                // light, or "All sessions" to aggregate (default).
-                menu.addItem(NSMenuItem.separator())
-                let followItem = NSMenuItem(title: "Follow Session", action: nil, keyEquivalent: "")
-                let followSubmenu = NSMenu()
                 let followedId = status.followedSessionId
 
-                let allItem = NSMenuItem(title: "All sessions (aggregate)",
-                                         action: #selector(setFollow(_:)),
-                                         keyEquivalent: "")
-                allItem.target = self
-                allItem.representedObject = NSNull()
-                allItem.state = (followedId == nil) ? .on : .off
-                followSubmenu.addItem(allItem)
-                followSubmenu.addItem(NSMenuItem.separator())
+                // Prominent "Following: <pretty>" indicator with one-click
+                // "Stop Following" action — visible at a glance whenever the
+                // bulb is locked to one session, no submenu hunting needed.
+                if let fid = followedId {
+                    let followed = list.first(where: { $0.id == fid })
+                    let label = followed.flatMap { Self.prettySessionLabel($0) } ?? String(fid.prefix(8)) + "…"
+                    let stopItem = NSMenuItem(title: "★ Following \(label) — click to unfollow",
+                                              action: #selector(stopFollowing),
+                                              keyEquivalent: "")
+                    stopItem.target = self
+                    menu.addItem(stopItem)
+                }
 
                 for session in sorted {
-                    let label: String
+                    // Primary item: click to toggle follow on this session.
+                    let item = NSMenuItem(title: "",
+                                          action: #selector(toggleFollow(_:)),
+                                          keyEquivalent: "")
+                    item.attributedTitle = sessionRowAttributedTitle(session, nowMs: nowMs)
+                    item.representedObject = session.id
+                    item.target = self
+                    item.toolTip = "Click to \(session.id == followedId ? "unfollow" : "follow") · ⌥ Option-click to reveal cwd in Finder"
+                    item.state = (session.id == followedId) ? .on : .off
+                    menu.addItem(item)
+
+                    // Hidden alternate (⌥ Option held): reveal cwd in Finder.
                     if let cwd = session.cwd, !cwd.isEmpty {
-                        let home = FileManager.default.homeDirectoryForCurrentUser.path
-                        let pretty = cwd.hasPrefix(home) ? "~" + cwd.dropFirst(home.count) : cwd
-                        label = pretty
-                    } else {
-                        label = String(session.id.prefix(8)) + "…"
+                        let alt = NSMenuItem(title: "Reveal in Finder",
+                                             action: #selector(revealSessionCwd(_:)),
+                                             keyEquivalent: "")
+                        alt.attributedTitle = sessionRowAttributedTitle(session, nowMs: nowMs, suffix: " — Reveal in Finder")
+                        alt.representedObject = cwd
+                        alt.target = self
+                        alt.isAlternate = true
+                        alt.keyEquivalentModifierMask = [.option]
+                        menu.addItem(alt)
                     }
-                    let mi = NSMenuItem(title: label,
-                                        action: #selector(setFollow(_:)),
-                                        keyEquivalent: "")
-                    mi.target = self
-                    mi.representedObject = session.id
-                    mi.toolTip = session.id
-                    mi.state = (session.id == followedId) ? .on : .off
-                    followSubmenu.addItem(mi)
                 }
-                followItem.submenu = followSubmenu
-                menu.addItem(followItem)
             }
             
             let adapterStatus = status.adapter.ok ? "✓" : "✗"
@@ -153,7 +152,19 @@ class MenuBuilder: NSObject, NSMenuDelegate {
         }
         
         menu.addItem(NSMenuItem.separator())
-        
+
+        // Top-level Floating Widget toggle. Hardcoded ⌥⇧L global hotkey is
+        // wired in AppDelegate; mirror it here so users can find/toggle the
+        // widget without digging into Settings.
+        let widgetTitle = ui.floatingWindowEnabled ? "Hide Floating Widget" : "Show Floating Widget"
+        let widgetItem = NSMenuItem(title: widgetTitle,
+                                    action: #selector(toggleFloatingWidget),
+                                    keyEquivalent: "L")
+        widgetItem.keyEquivalentModifierMask = [.option, .shift]
+        widgetItem.target = self
+        widgetItem.state = ui.floatingWindowEnabled ? .on : .off
+        menu.addItem(widgetItem)
+
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         menu.addItem(settingsItem)
         menu.addItem(NSMenuItem(title: "Edit Config (raw)…", action: #selector(editConfig), keyEquivalent: ""))
@@ -365,18 +376,30 @@ class MenuBuilder: NSObject, NSMenuDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    @objc private func setFollow(_ sender: NSMenuItem) {
-        // representedObject is either an NSNull (clear / aggregate-all) or
-        // the session id String to follow.
-        let target: String?
-        if sender.representedObject is NSNull {
-            target = nil
-        } else if let id = sender.representedObject as? String {
-            target = id
-        } else {
-            return
-        }
+    @objc private func toggleFollow(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        // If this session is already followed → unfollow (back to aggregate).
+        // Otherwise → follow it.
+        let target: String? = (sender.state == .on) ? nil : id
         Task { await configStore.setFollowedSession(target) }
+    }
+
+    @objc private func stopFollowing() {
+        Task { await configStore.setFollowedSession(nil) }
+    }
+
+    @objc private func toggleFloatingWidget() {
+        ui.floatingWindowEnabled.toggle()
+    }
+
+    /// Pretty label for a session: home-abbreviated cwd if available, else
+    /// the first 8 chars of the session id.
+    static func prettySessionLabel(_ session: SessionDetail) -> String? {
+        if let cwd = session.cwd, !cwd.isEmpty {
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            return cwd.hasPrefix(home) ? "~" + cwd.dropFirst(home.count) : cwd
+        }
+        return nil
     }
 
     private func abbreviateHome(_ path: String) -> String {
@@ -412,7 +435,7 @@ class MenuBuilder: NSObject, NSMenuDelegate {
     /// state colour. Falls back gracefully when the daemon doesn't supply
     /// per-session state (older daemon, edge cases). Idle sessions render
     /// dimmed with their last-event age in place of the tool name.
-    private func sessionRowAttributedTitle(_ session: SessionDetail, nowMs: Int) -> NSAttributedString {
+    private func sessionRowAttributedTitle(_ session: SessionDetail, nowMs: Int, suffix: String? = nil) -> NSAttributedString {
         let stateName = session.state ?? "ready"
         let idle = Self.isIdle(session, nowMs: nowMs)
         let style = configStore.doc.style(for: stateName)
@@ -474,6 +497,15 @@ class MenuBuilder: NSObject, NSMenuDelegate {
                     ]
                 ))
             }
+        }
+        if let suffix = suffix, !suffix.isEmpty {
+            attr.append(NSAttributedString(
+                string: suffix,
+                attributes: [
+                    .font: NSFont.menuFont(ofSize: 0),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                ]
+            ))
         }
         return attr
     }
