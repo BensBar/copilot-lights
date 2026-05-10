@@ -156,18 +156,32 @@ export class GoveeAdapter implements LightAdapter {
     // outgoing control packets).
     this.socket = this.socketFactory();
 
+    // Bind to the response port so we can hear discovery replies. Try 4002
+    // first (Govee devices reply there), then fall back to an OS-assigned
+    // port if 4002 is unavailable — control packets still go out fine, only
+    // discovery replies are missed in that case.
     await new Promise<void>((resolve, reject) => {
-      this.socket!.once('error', reject);
-      // Bind to the response port so we can hear discovery replies.
-      // 0 = let the OS pick if 4002 is unavailable; we'll still send.
-      this.socket!.bind(4002, () => {
-        this.socket!.removeListener('error', reject);
-        try {
-          this.socket!.setBroadcast(true);
-        } catch {
-          // Some platforms reject this; not fatal for unicast control.
-        }
-        resolve();
+      const sock = this.socket!;
+      const bindToPort = (port: number, onFail?: (err: Error) => void) => {
+        const onError = (err: Error) => {
+          if (onFail) onFail(err);
+          else reject(err);
+        };
+        sock.once('error', onError);
+        sock.bind(port, () => {
+          sock.removeListener('error', onError);
+          try {
+            sock.setBroadcast(true);
+          } catch {
+            // Some platforms reject this; not fatal for unicast control.
+          }
+          resolve();
+        });
+      };
+      bindToPort(4002, () => {
+        // 4002 unavailable (already bound by another govee tool, etc.) —
+        // ask the OS for any free port.
+        bindToPort(0);
       });
     });
 

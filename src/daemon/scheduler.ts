@@ -202,13 +202,11 @@ export class Scheduler {
       };
     }
 
-    // Fallback (should never reach)
+    // Exhaustive: each effect branch above returns. If a new effect is added
+    // to the schema, this assignment fails to typecheck — surfacing the gap
+    // at build time instead of silently returning an arbitrary frame.
     const _exhaustive: never = style;
-    return {
-      rgb,
-      brightness: (_exhaustive as any).brightness,
-      transitionMs: this.cfg.transitionMs,
-    };
+    throw new Error(`Unhandled effect: ${JSON.stringify(_exhaustive)}`);
   }
 
   private tick(): void {

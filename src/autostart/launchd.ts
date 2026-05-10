@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync, unlinkSync, rmSync, renameSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, rmSync, renameSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
 import { randomBytes } from 'crypto';
@@ -94,19 +94,23 @@ export function writePlist(opts: LaunchdOptions): string {
   const plistDir = dirname(plistPath);
   const plistContent = renderPlist(opts);
 
-  // Atomic write: temp file + rename
+  // Ensure the parent directory exists. ~/Library/LaunchAgents normally
+  // exists on macOS but is missing on a fresh install (and on test
+  // tmpdirs the caller may not have created it).
+  mkdirSync(plistDir, { recursive: true });
+
+  // Atomic write: temp file + rename. renameSync overwrites an existing
+  // destination atomically on POSIX, so no separate unlink step is needed.
   const tempPath = join(plistDir, `.${randomBytes(8).toString('hex')}.tmp`);
   writeFileSync(tempPath, plistContent, { mode: 0o644 });
 
   try {
-    // Use rename for atomic swap
-    rmSync(plistPath, { force: true });
-  } catch {
-    // Ignore if file doesn't exist
+    renameSync(tempPath, plistPath);
+  } catch (err) {
+    // If rename fails, clean up the temp file and rethrow.
+    rmSync(tempPath, { force: true });
+    throw err;
   }
-
-  // Move temp file to final location
-  renameSync(tempPath, plistPath);
 
   return plistPath;
 }

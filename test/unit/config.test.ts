@@ -126,29 +126,29 @@ describe('DEFAULT_STATE_STYLES', () => {
 
   it('ready state has correct defaults', () => {
     const ready = DEFAULT_STATE_STYLES.ready;
-    expect(ready.color).toBe('#4ade80');
-    expect(ready.brightness).toBe(30);
+    expect(ready.color).toBe('#7ee787');
+    expect(ready.brightness).toBe(25);
     expect(ready.effect).toBe('steady');
   });
 
   it('thinking state has correct defaults', () => {
     const thinking = DEFAULT_STATE_STYLES.thinking;
-    expect(thinking.color).toBe('#d946ef');
-    expect(thinking.brightness).toBe(55);
-    expect(thinking.effect).toBe('steady');
+    expect(thinking.color).toBe('#58a6ff');
+    expect(thinking.brightness).toBe(40);
+    expect(thinking.effect).toBe('breathe');
   });
 
   it('awaiting_input state has correct defaults', () => {
     const awaiting = DEFAULT_STATE_STYLES.awaiting_input;
-    expect(awaiting.color).toBe('#fb923c');
-    expect(awaiting.brightness).toBe(75);
-    expect(awaiting.effect).toBe('steady');
+    expect(awaiting.color).toBe('#f0b429');
+    expect(awaiting.brightness).toBe(60);
+    expect(awaiting.effect).toBe('pulse');
   });
 
   it('error state has correct defaults', () => {
     const error = DEFAULT_STATE_STYLES.error;
-    expect(error.color).toBe('#ef4444');
-    expect(error.brightness).toBe(85);
+    expect(error.color).toBe('#f85149');
+    expect(error.brightness).toBe(80);
     expect(error.effect).toBe('flash');
     expect(error.count).toBe(2);
     expect(error.ttlMs).toBe(4000);
@@ -156,9 +156,9 @@ describe('DEFAULT_STATE_STYLES', () => {
 
   it('done state has correct defaults', () => {
     const done = DEFAULT_STATE_STYLES.done;
-    expect(done.color).toBe('#a3e635');
+    expect(done.color).toBe('#7ee787');
     expect(done.brightness).toBe(70);
-    expect(done.effect).toBe('steady');
+    expect(done.effect).toBe('pulse');
   });
 });
 

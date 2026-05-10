@@ -59,8 +59,8 @@ describe('Scheduler', () => {
       expect(adapter.frames.length).toBeGreaterThan(0);
       const frame = adapter.lastFrame();
       expect(frame).not.toBeNull();
-      expect(frame!.rgb).toEqual({ r: 74, g: 222, b: 128 }); // #4ade80
-      expect(frame!.brightness).toBe(30);
+      expect(frame!.rgb).toEqual({ r: 126, g: 231, b: 135 }); // #7ee787
+      expect(frame!.brightness).toBe(25);
       expect(frame!.transitionMs).toBe(600);
     });
 
@@ -87,8 +87,8 @@ describe('Scheduler', () => {
 
       expect(adapter.frames.length).toBe(1);
       const frame = adapter.frames[0]!;
-      expect(frame.rgb).toEqual({ r: 74, g: 222, b: 128 });
-      expect(frame.brightness).toBe(30);
+      expect(frame.rgb).toEqual({ r: 126, g: 231, b: 135 });
+      expect(frame.brightness).toBe(25);
       expect(frame.transitionMs).toBe(600);
     });
 

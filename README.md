@@ -111,6 +111,7 @@ copilot-lights install [--statusline] # wire hooks into ~/.copilot/hooks.json (i
                                       # --statusline also wires settings.json
 copilot-lights uninstall              # remove our entries from hooks.json + settings.json
 copilot-lights status [--json]        # query the running daemon over the socket
+copilot-lights doctor                 # check config/hooks/daemon/autostart and report what's broken
 copilot-lights statusline             # internal — prints one line for Copilot's footer
 copilot-lights enable-autostart       # generate launchd/systemd unit (does not load it)
 copilot-lights disable-autostart      # delete the unit file

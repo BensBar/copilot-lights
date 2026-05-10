@@ -386,19 +386,19 @@ export class StateAggregator {
   /** Compute the resolved global LightState given the current time. */
   resolve(): LightState {
     const now = this.now();
-    const activeSessions = this.getActiveSessions(now);
-    this.applyDecay(activeSessions, now);
+    const active = this.collectActiveSessions(now);
+    this.applyDecay(active, now);
 
-    if (activeSessions.length === 0) return 'off';
+    if (active.length === 0) return 'off';
 
     // Follow-session mode: report only the followed session's state. Falls
     // back to aggregation if the followed session has ended/expired.
     if (this.followSessionId !== null) {
-      const followed = activeSessions.find((s) => s.id === this.followSessionId);
+      const followed = active.find((s) => s.id === this.followSessionId);
       if (followed) return this.resolveSessionState(followed, now);
     }
 
-    const states = activeSessions.map((s) => this.resolveSessionState(s, now));
+    const states = active.map((s) => this.resolveSessionState(s, now));
     for (const tier of STATE_PRECEDENCE) {
       if (tier === 'off') continue; // 'off' only applies when no sessions
       if (states.includes(tier)) return tier;
@@ -484,8 +484,8 @@ export class StateAggregator {
    * a stuck-thinking signal is more correct than mid-turn flicker,
    * and the next user prompt always recovers.
    */
-  private applyDecay(activeSessions: SessionState[], now: number): void {
-    for (const s of activeSessions) {
+  private applyDecay(active: SessionState[], now: number): void {
+    for (const s of active) {
       const isThinking = s.activeTools > 0 || s.activeSubagents > 0 || s.pendingTurns > 0;
       const hasInputFlag = s.awaitingPermission || s.hasAttentionNotification;
       // Key off `lastToolEventTs` (PreToolUse / PostToolUse / SubagentStart /
@@ -516,7 +516,7 @@ export class StateAggregator {
   /** Active session ids (post-SessionStart, pre-SessionEnd, not idle-expired). */
   activeSessions(): string[] {
     const now = this.now();
-    return this.getActiveSessions(now).map(s => s.id);
+    return this.collectActiveSessions(now).map(s => s.id);
   }
 
   /** For debugging / `copilot-lights status`. */
@@ -538,14 +538,14 @@ export class StateAggregator {
     }>;
   } {
     const now = this.now();
-    const activeSessions = this.getActiveSessions(now);
+    const active = this.collectActiveSessions(now);
     // Run decay before resolving global so per-session state matches
     // the post-decay reality the global aggregate is computed against.
-    this.applyDecay(activeSessions, now);
-    const globalState: LightState = activeSessions.length === 0
+    this.applyDecay(active, now);
+    const globalState: LightState = active.length === 0
       ? 'off'
       : (() => {
-          const states = activeSessions.map((s) => this.resolveSessionState(s, now));
+          const states = active.map((s) => this.resolveSessionState(s, now));
           for (const tier of STATE_PRECEDENCE) {
             if (tier === 'off') continue;
             if (states.includes(tier)) return tier;
@@ -555,7 +555,7 @@ export class StateAggregator {
 
     return {
       state: globalState,
-      sessions: activeSessions.map(s => ({
+      sessions: active.map(s => ({
         id: s.id,
         activeTools: s.activeTools,
         activeSubagents: s.activeSubagents,
@@ -572,7 +572,7 @@ export class StateAggregator {
     };
   }
 
-  private getActiveSessions(now: number): SessionState[] {
+  private collectActiveSessions(now: number): SessionState[] {
     const result: SessionState[] = [];
     for (const session of this.sessions.values()) {
       if (now - session.lastEventTs < this.sessionIdleTtlMs) {

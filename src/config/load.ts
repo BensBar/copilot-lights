@@ -75,7 +75,7 @@ function resolveEnvRefs(obj: unknown): unknown {
   return obj;
 }
 
-async function loadConfigFromPath(path: string): Promise<LoadResult> {
+async function loadConfigFromPath(path: string): Promise<LoadResult | null> {
   try {
     const content = await readFile(path, 'utf-8');
     const parsed = JSON.parse(content);
@@ -89,7 +89,7 @@ async function loadConfigFromPath(path: string): Promise<LoadResult> {
     return { config, sourcePath: path };
   } catch (error) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-      return null as any;
+      return null;
     }
     throw error;
   }

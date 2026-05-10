@@ -46,34 +46,31 @@ describe('autostart/index', () => {
     });
 
     it('writes plist on launchd platform', () => {
-      enable({
-        binaryPath: '/usr/local/bin/copilot-lights',
-        platform: 'launchd',
-        configPath: '/etc/config.json',
-      });
-
-      // Override the path in the result to use our temp directory
-      // Since enable() uses defaultPlistPath(), we test with explicit path
+      const plistPath = join(tempDir, 'com.copilot-lights.daemon.plist');
       const result = enable({
         binaryPath: '/usr/local/bin/copilot-lights',
         platform: 'launchd',
+        configPath: '/etc/config.json',
+        path: plistPath,
       });
 
       expect(result.platform).toBe('launchd');
-      expect(result.path).toContain('LaunchAgents');
+      expect(result.path).toBe(plistPath);
       expect(result.nextSteps).toContain('launchctl load');
       expect(result.nextSteps).toContain('launchctl unload');
     });
 
     it('writes unit on systemd platform', () => {
+      const unitPath = join(tempDir, 'copilot-lights.service');
       const result = enable({
         binaryPath: '/usr/local/bin/copilot-lights',
         platform: 'systemd',
         configPath: '/etc/config.json',
+        path: unitPath,
       });
 
       expect(result.platform).toBe('systemd');
-      expect(result.path).toContain('.config/systemd/user');
+      expect(result.path).toBe(unitPath);
       expect(result.nextSteps).toContain('systemctl --user');
       expect(result.nextSteps).toContain('daemon-reload');
     });
@@ -93,8 +90,10 @@ describe('autostart/index', () => {
     it('detects platform automatically when not overridden', () => {
       const spy = vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
       try {
+        const unitPath = join(tempDir, 'copilot-lights.service');
         const result = enable({
           binaryPath: '/usr/local/bin/copilot-lights',
+          path: unitPath,
         });
         expect(result.platform).toBe('systemd');
       } finally {
@@ -103,10 +102,12 @@ describe('autostart/index', () => {
     });
 
     it('includes configPath in nextSteps messaging', () => {
+      const plistPath = join(tempDir, 'com.copilot-lights.daemon.plist');
       const result = enable({
         binaryPath: '/usr/local/bin/copilot-lights',
         configPath: '/etc/config.json',
         platform: 'launchd',
+        path: plistPath,
       });
 
       // launchd nextSteps should show the actual path
@@ -126,11 +127,11 @@ describe('autostart/index', () => {
     });
 
     it('removes plist file on launchd', () => {
-      // Create a temporary plist for testing
       const plistPath = join(tempDir, 'test.plist');
       enable({
         binaryPath: '/usr/local/bin/copilot-lights',
         platform: 'launchd',
+        path: plistPath,
       });
 
       const result = disable({
@@ -139,7 +140,7 @@ describe('autostart/index', () => {
       });
 
       expect(result.platform).toBe('launchd');
-      // Note: removed might be false since we used tempdir
+      expect(result.removed).toBe(true);
     });
 
     it('returns false when no file exists', () => {
@@ -158,6 +159,7 @@ describe('autostart/index', () => {
       enable({
         binaryPath: '/usr/local/bin/copilot-lights',
         platform: 'systemd',
+        path: unitPath,
       });
 
       const result = disable({
@@ -166,6 +168,7 @@ describe('autostart/index', () => {
       });
 
       expect(result.platform).toBe('systemd');
+      expect(result.removed).toBe(true);
     });
 
     it('detects platform automatically when not overridden', () => {

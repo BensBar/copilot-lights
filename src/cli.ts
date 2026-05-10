@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import kleur from 'kleur';
-import { readFileSync, writeFileSync, realpathSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, realpathSync, existsSync, unlinkSync, renameSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { loadConfig, defaultSocketPath } from './config/load.js';
 import { createAdapter } from './adapters/registry.js';
 import { Daemon } from './daemon/server.js';
@@ -13,8 +14,32 @@ import { pairWithBridge } from './adapters/hue.js';
 import { sendToDaemon } from './bridge/client.js';
 import { runStatusline } from './bridge/statusline.js';
 import { installStatusline, uninstallStatusline } from './bridge/statusline-install.js';
-import { enable as enableAutostart, disable as disableAutostart } from './autostart/index.js';
+import {
+  enable as enableAutostart,
+  disable as disableAutostart,
+  detectPlatform as autostartDetectPlatform,
+} from './autostart/index.js';
+import { defaultPlistPath as launchdDefaultPlistPath } from './autostart/launchd.js';
+import { defaultUnitPath as systemdDefaultUnitPath } from './autostart/systemd.js';
 import type { CopilotLightsConfig } from './config/schema.js';
+
+/**
+ * Write `body` to `target` atomically: write to a sibling temp file, then
+ * rename. renameSync is atomic on POSIX (overwriting an existing file in
+ * place), so a concurrent reader sees either the old or the new content,
+ * never a partial write.
+ */
+function atomicWriteFile(target: string, body: string, mode: number): void {
+  const dir = dirname(target);
+  const tempPath = join(dir, `.${randomBytes(8).toString('hex')}.tmp`);
+  writeFileSync(tempPath, body, { mode });
+  try {
+    renameSync(tempPath, target);
+  } catch (err) {
+    rmSync(tempPath, { force: true });
+    throw err;
+  }
+}
 
 const EVENT_MAP: Record<string, string> = {
   sessionStart: 'SessionStart',
@@ -130,24 +155,10 @@ export async function cmdInstall(opts: InstallOptions): Promise<InstallResult> {
     wiredEvents.push(camelKey);
   }
 
-  // Atomic write
-  const hooksDir = dirname(opts.hooksFile);
-  mkdirSync(hooksDir, { recursive: true });
-  
-  const tmpFile = join(hooksDir, `.hooks.json.${Date.now()}.tmp`);
-  const body = JSON.stringify(hooksData, null, 2);
-  writeFileSync(tmpFile, body, { mode: 0o600 });
-  writeFileSync(opts.hooksFile, body, { mode: 0o600 });
-
-  // Clean up temp file (best effort)
-  try {
-    if (existsSync(tmpFile)) {
-      const fs = await import('node:fs');
-      fs.unlinkSync(tmpFile);
-    }
-  } catch {
-    // Ignore
-  }
+  // Atomic write: temp + rename so a partial/interrupted write can't leave a
+  // half-written hooks file that Copilot CLI would fail to parse.
+  mkdirSync(dirname(opts.hooksFile), { recursive: true });
+  atomicWriteFile(opts.hooksFile, JSON.stringify(hooksData, null, 2), 0o600);
 
   logger(kleur.green(`✓ Wired ${wiredEvents.length} event hooks`));
   logger(kleur.dim(`  Binary: ${opts.binaryPath}`));
@@ -294,22 +305,7 @@ export async function cmdUninstall(opts: UninstallOptions): Promise<UninstallRes
     delete hooksData.hooks[key];
   }
 
-  // Atomic write
-  const hooksDir = dirname(opts.hooksFile);
-  const tmpFile = join(hooksDir, `.hooks.json.${Date.now()}.tmp`);
-  const body = JSON.stringify(hooksData, null, 2);
-  writeFileSync(tmpFile, body, { mode: 0o600 });
-  writeFileSync(opts.hooksFile, body, { mode: 0o600 });
-
-  // Clean up temp file (best effort)
-  try {
-    if (existsSync(tmpFile)) {
-      const fs = await import('node:fs');
-      fs.unlinkSync(tmpFile);
-    }
-  } catch {
-    // Ignore
-  }
+  atomicWriteFile(opts.hooksFile, JSON.stringify(hooksData, null, 2), 0o600);
 
   if (removedCount > 0) {
     logger(kleur.green(`✓ Removed ${removedCount} hook entries`));
@@ -426,6 +422,175 @@ function humanizeMs(ms: number): string {
   } else {
     return `${seconds}s`;
   }
+}
+
+export interface DoctorOptions {
+  hooksFile: string;
+  socketPath: string;
+  configPath?: string;
+  /** When set, override platform detection (used by tests). */
+  platform?: 'launchd' | 'systemd' | 'unsupported';
+  /** When set, the path the autostart unit should live at. */
+  autostartPath?: string;
+  logger?: (s: string) => void;
+}
+
+export interface DoctorCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface DoctorResult {
+  ok: boolean;
+  checks: DoctorCheck[];
+}
+
+/**
+ * Health-check the user's setup. Reports on:
+ *   - config file (loadable + valid)
+ *   - hooks.json (exists and references our binary)
+ *   - daemon (reachable on the configured socket)
+ *   - adapter status (from the daemon if running)
+ *   - autostart unit (file present at the platform-specific location)
+ *
+ * Pure: returns DoctorResult. CLI wraps it for printing. Each check is
+ * independent — a single failure doesn't short-circuit the others, since
+ * the user usually wants the full picture.
+ */
+export async function cmdDoctor(opts: DoctorOptions): Promise<DoctorResult> {
+  const checks: DoctorCheck[] = [];
+
+  // 1. Config
+  try {
+    const r = await loadConfig(opts.configPath);
+    if (r.sourcePath) {
+      checks.push({ name: 'config', ok: true, detail: `loaded from ${r.sourcePath} (adapter=${r.config.adapter})` });
+    } else {
+      checks.push({
+        name: 'config',
+        ok: true,
+        detail: `using built-in defaults (no config at ~/.copilot-lights/config.json) — adapter=${r.config.adapter}`,
+      });
+    }
+  } catch (err) {
+    checks.push({
+      name: 'config',
+      ok: false,
+      detail: `invalid config: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
+  // 2. Hooks file
+  if (!existsSync(opts.hooksFile)) {
+    checks.push({
+      name: 'hooks',
+      ok: false,
+      detail: `missing ${opts.hooksFile} — run \`copilot-lights install\``,
+    });
+  } else {
+    try {
+      const data = JSON.parse(readFileSync(opts.hooksFile, 'utf-8'));
+      const hooks = data?.hooks;
+      let wired = 0;
+      if (hooks && typeof hooks === 'object') {
+        for (const value of Object.values(hooks)) {
+          const entries = Array.isArray(value) ? value : [value];
+          for (const entry of entries) {
+            if (
+              entry &&
+              typeof entry === 'object' &&
+              typeof (entry as { command?: unknown }).command === 'string' &&
+              ((entry as { command: string }).command.includes('copilot-lights hook ') ||
+                (entry as { command: string }).command.includes(' copilot-lights '))
+            ) {
+              wired++;
+            }
+          }
+        }
+      }
+      if (wired === 0) {
+        checks.push({
+          name: 'hooks',
+          ok: false,
+          detail: `${opts.hooksFile} exists but has no copilot-lights entries — run \`copilot-lights install\``,
+        });
+      } else {
+        checks.push({ name: 'hooks', ok: true, detail: `${wired} hook entries wired in ${opts.hooksFile}` });
+      }
+    } catch (err) {
+      checks.push({
+        name: 'hooks',
+        ok: false,
+        detail: `cannot parse ${opts.hooksFile}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  // 3. Daemon reachability + adapter status
+  const reply = await sendToDaemon(
+    { kind: 'query', query: 'status' },
+    { socketPath: opts.socketPath, expectReply: true, timeoutMs: 1000 }
+  );
+  if (!reply) {
+    checks.push({
+      name: 'daemon',
+      ok: false,
+      detail: `not reachable on ${opts.socketPath} — run \`copilot-lights daemon\` (or enable autostart)`,
+    });
+  } else {
+    try {
+      const status = JSON.parse(reply);
+      checks.push({
+        name: 'daemon',
+        ok: true,
+        detail: `running on ${opts.socketPath} (state=${status.state}, sessions=${status.sessions ?? 0})`,
+      });
+      if (status.adapter && typeof status.adapter === 'object') {
+        checks.push({
+          name: 'adapter',
+          ok: status.adapter.ok !== false,
+          detail: status.adapter.ok === false
+            ? `${status.adapter.kind} reporting error: ${status.adapter.lastError ?? 'unknown'}`
+            : `${status.adapter.kind} ok`,
+        });
+      }
+    } catch (err) {
+      checks.push({
+        name: 'daemon',
+        ok: false,
+        detail: `daemon replied but response was unparseable: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  // 4. Autostart unit
+  const platform = opts.platform ?? autostartDetectPlatform();
+  if (platform === 'launchd' || platform === 'systemd') {
+    const path =
+      opts.autostartPath ??
+      (platform === 'launchd' ? launchdDefaultPlistPath() : systemdDefaultUnitPath());
+    if (existsSync(path)) {
+      checks.push({ name: 'autostart', ok: true, detail: `${platform} unit present at ${path}` });
+    } else {
+      checks.push({
+        name: 'autostart',
+        ok: false,
+        detail: `no ${platform} unit at ${path} — run \`copilot-lights enable-autostart\` if you want one`,
+      });
+    }
+  } else {
+    checks.push({
+      name: 'autostart',
+      ok: true,
+      detail: 'autostart not supported on this platform — run the daemon under your own supervisor',
+    });
+  }
+
+  return {
+    ok: checks.every((c) => c.ok),
+    checks,
+  };
 }
 
 export interface DaemonOptions {
@@ -785,7 +950,7 @@ function migrateLegacyHooksFile(binaryPath: string): void {
     }
   } else {
     try {
-      writeFileSync(legacyFile, JSON.stringify(data, null, 2), { mode: 0o600 });
+      atomicWriteFile(legacyFile, JSON.stringify(data, null, 2), 0o600);
     } catch {
       // ignore
     }
@@ -914,6 +1079,29 @@ program
     } catch (error) {
       console.error(kleur.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
       process.exit(1);
+    }
+  });
+
+program
+  .command('doctor')
+  .description('Check config, hooks wiring, daemon reachability, and autostart status')
+  .option('--config <path>', 'Path to config file')
+  .option('--socket <path>', 'Unix socket path')
+  .action(async (options) => {
+    const hooksFile = join(homedir(), '.copilot', 'hooks', 'copilot-lights.json');
+    const socketPath = options.socket ?? defaultSocketPath();
+    const result = await cmdDoctor({
+      hooksFile,
+      socketPath,
+      configPath: options.config,
+    });
+    for (const c of result.checks) {
+      const mark = c.ok ? kleur.green('✓') : kleur.red('✗');
+      const label = c.ok ? kleur.bold(c.name) : kleur.red(kleur.bold(c.name));
+      console.log(`${mark} ${label}: ${c.detail}`);
+    }
+    if (!result.ok) {
+      process.exitCode = 1;
     }
   });
 

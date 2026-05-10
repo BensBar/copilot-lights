@@ -87,31 +87,36 @@ export type CopilotLightsConfig = z.infer<typeof ConfigSchema>;
 
 export const DEFAULT_STATE_STYLES: Record<StateName, z.infer<typeof StateStyleSchema>> = {
   ready: {
-    color: '#4ade80',
-    brightness: 30,
+    color: '#7ee787',
+    brightness: 25,
     effect: 'steady',
   },
   thinking: {
-    color: '#d946ef',
-    brightness: 55,
-    effect: 'steady',
+    color: '#58a6ff',
+    brightness: 40,
+    effect: 'breathe',
+    periodMs: 4000,
   },
   awaiting_input: {
-    color: '#fb923c',
-    brightness: 75,
-    effect: 'steady',
+    color: '#f0b429',
+    brightness: 60,
+    effect: 'pulse',
+    periodMs: 1500,
   },
   error: {
-    color: '#ef4444',
-    brightness: 85,
+    color: '#f85149',
+    brightness: 80,
     effect: 'flash',
     count: 2,
     ttlMs: 4000,
   },
   done: {
-    color: '#a3e635',
+    color: '#7ee787',
     brightness: 70,
-    effect: 'steady',
+    effect: 'pulse',
+    periodMs: 1500,
+    count: 1,
+    ttlMs: 1500,
   },
 };
 

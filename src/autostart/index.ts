@@ -22,6 +22,12 @@ export interface EnableOptions {
   configPath?: string;
   /** Override platform for tests. */
   platform?: AutostartPlatform;
+  /**
+   * Override the path to write the unit/plist. Threaded to launchd.writePlist
+   * (as plistPath) or systemd.writeUnit (as unitPath). Used by tests so they
+   * don't write into real ~/Library/LaunchAgents or ~/.config/systemd.
+   */
+  path?: string;
 }
 
 /**
@@ -38,12 +44,14 @@ export function enable(opts: EnableOptions): { platform: AutostartPlatform; path
     path = launchd.writePlist({
       binaryPath: opts.binaryPath,
       configPath: opts.configPath,
+      plistPath: opts.path,
     });
     nextSteps = `To activate now: launchctl load -w '${path}'\nTo stop: launchctl unload '${path}'`;
   } else if (platform === 'systemd') {
     path = systemd.writeUnit({
       binaryPath: opts.binaryPath,
       configPath: opts.configPath,
+      unitPath: opts.path,
     });
     nextSteps =
       'To activate now: systemctl --user daemon-reload && systemctl --user enable --now copilot-lights.service';
