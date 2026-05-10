@@ -145,21 +145,31 @@ class StatusItemController: ObservableObject {
     }
     
     private func setIcon(rgb: RGBColor, brightness: Int) {
-        // 20×20 fills the menubar more prominently than the macOS template
-        // default of ~14–16. The status item lays out around a 22pt-tall
-        // bar so 20 leaves a 1pt vertical breathing strip above and below
-        // while making the Copilot mark + halo clearly visible.
-        let size = NSSize(width: 20, height: 20)
-        
+        // 22×22 to fill the full menubar height. We render a black rounded-
+        // square tile and inset the Copilot mark inside it so the logo reads
+        // as a coherent badge against any wallpaper or menubar tint, light
+        // or dark, rather than a floating glyph that disappears on busy
+        // backgrounds.
+        let size = NSSize(width: 22, height: 22)
+
         let image = NSImage(size: size, flipped: false) { rect in
+            // Black rounded-square tile.
+            let tile = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
+            NSColor.black.setFill()
+            tile.fill()
+
+            // Inset the mark so the tile shows as a frame around it.
+            let inset: CGFloat = 3
+            let markRect = rect.insetBy(dx: inset, dy: inset)
+
             if let template = self.copilotMarkTemplate {
-                self.drawTintedMark(template: template, rect: rect, rgb: rgb, brightness: brightness)
+                self.drawTintedMark(template: template, rect: markRect, rgb: rgb, brightness: brightness)
             } else {
-                self.drawFallbackCircle(rect: rect, rgb: rgb, brightness: brightness)
+                self.drawFallbackCircle(rect: markRect, rgb: rgb, brightness: brightness)
             }
             return true
         }
-        
+
         image.isTemplate = false
         statusItem?.button?.image = image
     }
