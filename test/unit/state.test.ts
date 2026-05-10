@@ -1167,6 +1167,89 @@ describe('StateAggregator', () => {
     });
   });
 
+  describe('autopilot detection', () => {
+    it('drops PermissionRequest events after consecutive auto-approvals (no awaiting_input flicker)', () => {
+      let now = 1000;
+      // threshold 2 → after 2 auto-approvals, autopilot kicks in.
+      const agg = new StateAggregator({
+        now: () => now,
+        permissionGraceMs: 2500,
+        autopilotThreshold: 2,
+      });
+      agg.apply({ event: 'SessionStart', sessionId: 's', ts: now });
+      agg.apply({ event: 'UserPromptSubmit', sessionId: 's', ts: now });
+
+      // Auto-approval #1: PR fires, then PreToolUse arrives 50 ms later.
+      now += 100;
+      agg.apply({ event: 'PermissionRequest', sessionId: 's', ts: now });
+      now += 50;
+      agg.apply({ event: 'PreToolUse', sessionId: 's', ts: now, toolName: 'bash' });
+      // (counter == 1, autopilot not yet triggered)
+
+      // Auto-approval #2: counter hits threshold → autopilot ON.
+      now += 100;
+      agg.apply({ event: 'PostToolUse', sessionId: 's', ts: now });
+      now += 100;
+      agg.apply({ event: 'PermissionRequest', sessionId: 's', ts: now });
+      now += 50;
+      agg.apply({ event: 'PreToolUse', sessionId: 's', ts: now, toolName: 'bash' });
+
+      // From here on, ANY PR should be ignored — even if we don't follow
+      // it up with a quick PreToolUse, the state must not flip to
+      // awaiting_input within the grace window.
+      now += 100;
+      agg.apply({ event: 'PostToolUse', sessionId: 's', ts: now });
+      now += 100;
+      agg.apply({ event: 'PermissionRequest', sessionId: 's', ts: now });
+      now += 5000; // long past graceMs
+      // No PreToolUse follows this PR — but autopilot should suppress it.
+      expect(agg.resolve()).not.toBe('awaiting_input');
+    });
+
+    it('falls out of autopilot the moment a PR genuinely lingers', () => {
+      let now = 1000;
+      const agg = new StateAggregator({
+        now: () => now,
+        permissionGraceMs: 2500,
+        autopilotThreshold: 2,
+      });
+      agg.apply({ event: 'SessionStart', sessionId: 's', ts: now });
+      agg.apply({ event: 'UserPromptSubmit', sessionId: 's', ts: now });
+
+      // Two quick auto-approvals → autopilot ON.
+      for (let i = 0; i < 2; i++) {
+        now += 100;
+        agg.apply({ event: 'PermissionRequest', sessionId: 's', ts: now });
+        now += 50;
+        agg.apply({ event: 'PreToolUse', sessionId: 's', ts: now, toolName: 'bash' });
+        now += 100;
+        agg.apply({ event: 'PostToolUse', sessionId: 's', ts: now });
+      }
+      const snap1 = agg.snapshot();
+      expect(snap1.sessions[0]?.autopilot).toBe(true);
+
+      // Now simulate the user toggling out of autopilot mid-stream:
+      // a PR fires, but no PreToolUse arrives. After 2× the grace
+      // window, autopilot should self-reset and the next PR should
+      // light up normally.
+      now += 100;
+      agg.apply({ event: 'PermissionRequest', sessionId: 's', ts: now });
+      // First snapshot: still suppressed (PR was dropped), so resolve
+      // shouldn't be awaiting_input.
+      expect(agg.resolve()).not.toBe('awaiting_input');
+
+      // Advance past 2× graceMs. The decay sweep clears autopilot.
+      now += 6000;
+      void agg.snapshot(); // trigger decay
+
+      // Next PR should be honoured normally.
+      now += 100;
+      agg.apply({ event: 'PermissionRequest', sessionId: 's', ts: now });
+      now += 3000; // past graceMs → awaiting_input
+      expect(agg.resolve()).toBe('awaiting_input');
+    });
+  });
+
   describe('subagent merging (Anthropic toolu_ ids)', () => {
     it('routes toolu_-shaped subagent events into the parent session sharing the same cwd', () => {
       const now = 1000;

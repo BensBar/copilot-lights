@@ -29,11 +29,16 @@ struct SessionDetail: Codable, Identifiable, Hashable {
     let awaitingPermission: Bool?
     let hasAttentionNotification: Bool?
     let lastDoneTs: Int?
+    /// True when the daemon has inferred that this session is running in
+    /// autopilot mode (every tool's PermissionRequest is being silently
+    /// auto-approved). Surfaced in the menubar so the user can see at a
+    /// glance which streams are autonomous.
+    let autopilot: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case id, cwd, lastEventTs, state, lastToolName
         case activeTools, activeSubagents, pendingTurns
-        case awaitingPermission, hasAttentionNotification, lastDoneTs
+        case awaitingPermission, hasAttentionNotification, lastDoneTs, autopilot
     }
 
     init(from decoder: Decoder) throws {
@@ -49,6 +54,7 @@ struct SessionDetail: Codable, Identifiable, Hashable {
         awaitingPermission = try c.decodeIfPresent(Bool.self, forKey: .awaitingPermission)
         hasAttentionNotification = try c.decodeIfPresent(Bool.self, forKey: .hasAttentionNotification)
         lastDoneTs = try c.decodeIfPresent(Int.self, forKey: .lastDoneTs)
+        autopilot = try c.decodeIfPresent(Bool.self, forKey: .autopilot)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -64,6 +70,7 @@ struct SessionDetail: Codable, Identifiable, Hashable {
         try c.encodeIfPresent(awaitingPermission, forKey: .awaitingPermission)
         try c.encodeIfPresent(hasAttentionNotification, forKey: .hasAttentionNotification)
         try c.encodeIfPresent(lastDoneTs, forKey: .lastDoneTs)
+        try c.encodeIfPresent(autopilot, forKey: .autopilot)
     }
 }
 

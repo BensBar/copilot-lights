@@ -69,6 +69,13 @@ export interface AggregatorOptions {
    * Cleared by Stop / SessionEnd, which set lastDoneTs >= lastWorkEventTs.
    * Default 2000ms. */
   thinkingHoldMs?: number;
+  /** Number of consecutive auto-approved PermissionRequests that must be
+   *  observed on a single session before we infer it's running in
+   *  autopilot mode. Once detected, subsequent PRs on that session are
+   *  dropped (no awaiting_input flicker) until one genuinely lingers.
+   *  Default 2 — low enough to catch autopilot quickly, high enough to
+   *  avoid false-positives from a single fast manual approval. */
+  autopilotThreshold?: number;
   /** Time source — injected for testability. Default Date.now. */
   now?: () => number;
 }
@@ -114,6 +121,26 @@ interface SessionState {
    * what each session is currently working on. Never cleared — the UI
    * can render it as "last tool: X" or hide it during ready/done. */
   lastToolName?: string;
+  /** Number of consecutive PermissionRequests on this session that
+   *  resolved within `permissionGraceMs` (i.e., a PreToolUse / PostToolUse
+   *  / Stop arrived before the grace window elapsed). Used to detect
+   *  autopilot mode by behaviour rather than by an explicit flag in the
+   *  hook payload (Copilot CLI does not currently expose one). */
+  /** Timestamp of the most recent PermissionRequest on this session,
+   *  recorded even when the PR is dropped by the autopilot guard. Used
+   *  by `applyDecay` to detect that a PR has been "lingering" — i.e.,
+   *  no PreToolUse has resolved it within 2× the grace window — which
+   *  is the signal that the user has switched out of autopilot mode. */
+  lastPermissionRequestTs?: number;
+  consecutiveAutoApprovals: number;
+  /** Once `consecutiveAutoApprovals` crosses `autopilotThreshold`, this
+   *  flips true and PermissionRequest events are dropped entirely for
+   *  this session — autopilot's per-tool PRs are auto-approved server-
+   *  side anyway, so surfacing them as "awaiting input" is misleading
+   *  and produces yellow flicker. Reset to false the first time a PR
+   *  on this session lingers past `autopilotThreshold * permissionGraceMs`,
+   *  i.e., the user has clearly switched out of autopilot. */
+  autopilotDetected: boolean;
 }
 
 /** Notification types that genuinely need the user's attention. Other types
@@ -141,6 +168,7 @@ export class StateAggregator {
   private readonly thinkingIdleTtlMs: number;
   private readonly permissionGraceMs: number;
   private readonly thinkingHoldMs: number;
+  private readonly autopilotThreshold: number;
   private readonly now: () => number;
   private readonly sessions = new Map<string, SessionState>();
   /** When set, resolve() reflects only this session instead of aggregating
@@ -155,6 +183,7 @@ export class StateAggregator {
     this.thinkingIdleTtlMs = opts?.thinkingIdleTtlMs ?? 30_000;
     this.permissionGraceMs = opts?.permissionGraceMs ?? 2500;
     this.thinkingHoldMs = opts?.thinkingHoldMs ?? 4000;
+    this.autopilotThreshold = opts?.autopilotThreshold ?? 2;
     this.now = opts?.now ?? (() => Date.now());
   }
 
@@ -206,6 +235,8 @@ export class StateAggregator {
           hasAttentionNotification: false,
           lastEventTs: ts,
           cwd: msg.cwd,
+          consecutiveAutoApprovals: 0,
+          autopilotDetected: false,
         };
         this.sessions.set(sessionId, session);
         return;
@@ -220,6 +251,8 @@ export class StateAggregator {
           hasAttentionNotification: false,
           lastEventTs: ts,
           cwd: msg.cwd,
+          consecutiveAutoApprovals: 0,
+          autopilotDetected: false,
         };
         this.sessions.set(sessionId, session);
       }
@@ -261,6 +294,12 @@ export class StateAggregator {
         break;
 
       case 'PreToolUse':
+        // If a fresh PermissionRequest is currently in flight on this session
+        // and the agent has already moved on to firing the tool within the
+        // grace window, that PR was auto-approved. Count it as evidence of
+        // autopilot mode (Copilot CLI doesn't expose an autopilot flag in
+        // hook payloads, so we infer it behaviourally).
+        this.observeAutoApproval(session, ts);
         session.activeTools++;
         if (msg.toolName) session.lastToolName = msg.toolName;
         // The agent is actively doing work — it's not awaiting input or
@@ -387,6 +426,20 @@ export class StateAggregator {
         // at subprocess spawn time rather than agent-decision time, so the
         // timestamp-vs-tool-event check alone misses some reorders.
         if (session.lastDoneTs !== undefined && ts < session.lastDoneTs) {
+          break;
+        }
+        // Record this PR's ts unconditionally — even if autopilot drops
+        // it below — so `applyDecay` can detect a lingering PR (no
+        // resolving tool event within 2× grace) and reset autopilot.
+        session.lastPermissionRequestTs = ts;
+        // Autopilot guard: if recent PRs on this session were all
+        // auto-approved within the grace window, this session is in
+        // autopilot mode and the user does NOT want yellow flicker for
+        // every per-tool permission prompt. Drop the PR — it will be
+        // auto-approved server-side and the next PreToolUse arrives
+        // momentarily anyway. Self-resetting: see `applyDecay`, which
+        // clears `autopilotDetected` the moment a PR genuinely lingers.
+        if (session.autopilotDetected) {
           break;
         }
         // Only set the timestamp on the rising edge (false → true). If
@@ -544,6 +597,54 @@ export class StateAggregator {
           s.lastDoneTs = s.lastToolEventTs;
         }
       }
+      // Autopilot self-reset: if a PR has been outstanding (no resolving
+      // tool event) for more than 2× the grace window, the user is
+      // clearly NOT in autopilot for this prompt — reset detection so
+      // subsequent PRs surface normally. Uses `lastPermissionRequestTs`
+      // (set on every PR, even ones the autopilot guard drops) rather
+      // than `awaitingPermission` (which is suppressed during autopilot).
+      if (
+        s.lastPermissionRequestTs !== undefined &&
+        now - s.lastPermissionRequestTs >= this.permissionGraceMs * 2
+      ) {
+        s.consecutiveAutoApprovals = 0;
+        s.autopilotDetected = false;
+        s.lastPermissionRequestTs = undefined;
+      }
+    }
+  }
+
+  /**
+   * Called from PreToolUse / PostToolUse / Stop. If a PermissionRequest
+   * is currently in flight on this session and the resolving event has
+   * arrived within `permissionGraceMs`, count it as an auto-approval.
+   * Once `consecutiveAutoApprovals` crosses `autopilotThreshold`, the
+   * session is treated as in autopilot mode and subsequent PRs are
+   * dropped at the ingress (see PermissionRequest handler).
+   *
+   * Behavioural inference is necessary because Copilot CLI does not
+   * expose an autopilot flag in the hook payload — neither in the
+   * PermissionRequest nor anywhere else we can read at hook time.
+   */
+  private observeAutoApproval(s: SessionState, now: number): void {
+    // The "PR was answered" signal is the arrival of any tool event
+    // (PreToolUse calls into here). Use `lastPermissionRequestTs` rather
+    // than `awaitingPermission` so we can also count auto-approvals where
+    // the PR was dropped at ingress by the autopilot guard — that's
+    // exactly the steady-state behaviour we want to keep observing so
+    // detection persists across long autopilot runs.
+    if (s.lastPermissionRequestTs === undefined) return;
+    const latency = now - s.lastPermissionRequestTs;
+    s.lastPermissionRequestTs = undefined;
+    if (latency < 0) return;
+    if (latency <= this.permissionGraceMs) {
+      s.consecutiveAutoApprovals++;
+      if (s.consecutiveAutoApprovals >= this.autopilotThreshold) {
+        s.autopilotDetected = true;
+      }
+    } else {
+      s.consecutiveAutoApprovals = 0;
+      s.autopilotDetected = false;
     }
   }
 
@@ -568,6 +669,7 @@ export class StateAggregator {
       lastEventTs: number;
       cwd?: string;
       lastToolName?: string;
+      autopilot: boolean;
       state: LightState;
     }>;
   } {
@@ -601,6 +703,7 @@ export class StateAggregator {
         lastEventTs: s.lastEventTs,
         cwd: s.cwd,
         lastToolName: s.lastToolName,
+        autopilot: s.autopilotDetected,
         state: this.resolveSessionState(s, now),
       })),
     };

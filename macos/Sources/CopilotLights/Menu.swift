@@ -498,6 +498,18 @@ class MenuBuilder: NSObject, NSMenuDelegate {
                 ))
             }
         }
+        if session.autopilot == true {
+            // Compact badge so the user can tell at a glance which streams
+            // are autonomous and explains why awaiting_input never appears
+            // for them.
+            attr.append(NSAttributedString(
+                string: "  ⚡︎ autopilot",
+                attributes: [
+                    .font: NSFont.menuFont(ofSize: 0),
+                    .foregroundColor: NSColor.systemYellow.withAlphaComponent(0.85),
+                ]
+            ))
+        }
         if let suffix = suffix, !suffix.isEmpty {
             attr.append(NSAttributedString(
                 string: suffix,
