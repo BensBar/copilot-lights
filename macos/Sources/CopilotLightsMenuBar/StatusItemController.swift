@@ -145,7 +145,11 @@ class StatusItemController: ObservableObject {
     }
     
     private func setIcon(rgb: RGBColor, brightness: Int) {
-        let size = NSSize(width: 14, height: 14)
+        // 20×20 fills the menubar more prominently than the macOS template
+        // default of ~14–16. The status item lays out around a 22pt-tall
+        // bar so 20 leaves a 1pt vertical breathing strip above and below
+        // while making the Copilot mark + halo clearly visible.
+        let size = NSSize(width: 20, height: 20)
         
         let image = NSImage(size: size, flipped: false) { rect in
             if let template = self.copilotMarkTemplate {
