@@ -78,15 +78,20 @@ actor DaemonClient {
         let connection = NWConnection(to: .unix(path: socketPath), using: .tcp)
         
         return await withCheckedContinuation { continuation in
-            var resumed = false
+            // `resumed` is read and written from multiple concurrent
+            // closures (NWConnection's state/receive/send handlers run
+            // on internal queues; the Task ran below runs separately).
+            // Wrap it in a tiny thread-safe holder so Swift's strict-
+            // concurrency checker accepts the capture — a plain `var`
+            // shared across nonisolated closures is rejected.
+            let resumed = ResumedFlag()
             
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
                     break
                 case .failed(let error):
-                    if !resumed {
-                        resumed = true
+                    if resumed.claim() {
                         if case .posix(let code) = error, code == .ENOENT || code == .ECONNREFUSED {
                             continuation.resume(returning: .offline)
                         } else {
@@ -95,8 +100,7 @@ actor DaemonClient {
                         connection.cancel()
                     }
                 case .cancelled:
-                    if !resumed {
-                        resumed = true
+                    if resumed.claim() {
                         continuation.resume(returning: .offline)
                     }
                 default:
@@ -109,13 +113,12 @@ actor DaemonClient {
             Task {
                 try? await Task.sleep(for: .milliseconds(50))
                 
-                guard !resumed else { return }
+                guard !resumed.isClaimed else { return }
                 
                 let query = StatusQuery()
                 guard let jsonData = try? JSONEncoder().encode(query),
                       let jsonString = String(data: jsonData, encoding: .utf8) else {
-                    if !resumed {
-                        resumed = true
+                    if resumed.claim() {
                         continuation.resume(returning: .error("encoding failed"))
                         connection.cancel()
                     }
@@ -126,8 +129,7 @@ actor DaemonClient {
                 
                 connection.send(content: message, completion: .contentProcessed { error in
                     if let error = error {
-                        if !resumed {
-                            resumed = true
+                        if resumed.claim() {
                             continuation.resume(returning: .error(error.localizedDescription))
                             connection.cancel()
                         }
@@ -139,9 +141,7 @@ actor DaemonClient {
                             connection.cancel()
                         }
                         
-                        if !resumed {
-                            resumed = true
-                            
+                        if resumed.claim() {
                             if let error = error {
                                 continuation.resume(returning: .error(error.localizedDescription))
                                 return
@@ -170,5 +170,31 @@ actor DaemonClient {
                 })
             }
         }
+    }
+}
+
+/// Thread-safe single-shot flag. The NWConnection handlers and the
+/// follow-up Task in `queryDaemon` race to resume the continuation
+/// exactly once; this wraps the "did anyone resume yet?" bit in a lock
+/// so the capture is safe under strict concurrency.
+private final class ResumedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    /// Atomically attempt to be the first caller. Returns true exactly
+    /// once across all callers; subsequent calls return false.
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if value { return false }
+        value = true
+        return true
+    }
+
+    /// Non-mutating read — useful for fast-path bail-outs before doing
+    /// expensive work. Not a substitute for `claim()` when actually
+    /// resuming the continuation.
+    var isClaimed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return value
     }
 }
