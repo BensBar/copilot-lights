@@ -11,7 +11,7 @@
 #   4. On macOS: builds and installs the "Copilot Lights" menubar app to
 #      /Applications and registers it for Launch at Login.
 #   5. Wires the Copilot CLI hooks (`copilot-lights install`).
-#   6. Enables daemon autostart (`copilot-lights autostart enable`).
+#   6. Enables daemon autostart (`copilot-lights enable-autostart`).
 #   7. Runs `copilot-lights doctor` and prints the result.
 #
 # All steps are idempotent — re-run safely to upgrade.
@@ -119,7 +119,7 @@ c_ok "hooks wired in ~/.copilot/hooks/copilot-lights.json"
 
 if [[ "$SKIP_AUTOSTART" != "1" ]]; then
   c_info "Enabling daemon autostart"
-  copilot-lights autostart enable >/dev/null
+  copilot-lights enable-autostart >/dev/null
   c_ok "daemon autostart registered"
 fi
 
