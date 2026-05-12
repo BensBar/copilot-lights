@@ -249,6 +249,106 @@ describe('Scheduler', () => {
     });
   });
 
+  describe('done coalescing', () => {
+    // These tests drive time manually rather than via vi.advanceTimersByTime,
+    // because coalescing reads the wall-clock time inside tick() and
+    // `vi.getMockedSystemTime()` is not advanced by `advanceTimersByTime`.
+    function makeScheduler(opts?: { doneCoalesceMs?: number }) {
+      let t = 1000000;
+      const adapter2 = new MockAdapter();
+      const s = new Scheduler(adapter2, cfg, {
+        fps: 10,
+        now: () => t,
+        ...(opts?.doneCoalesceMs !== undefined ? { doneCoalesceMs: opts.doneCoalesceMs } : {}),
+      });
+      // Drive ticks manually by calling tick() via setState transitions and
+      // by advancing `t` then invoking the private tick via setInterval —
+      // simpler: expose advance() that bumps t and calls tick().
+      const advance = (ms: number, stepMs = 100) => {
+        for (let elapsed = 0; elapsed < ms; elapsed += stepMs) {
+          t += stepMs;
+          (s as unknown as { tick(): void }).tick();
+        }
+      };
+      return { s, adapter: adapter2, advance, setT: (v: number) => { t = v; } };
+    }
+
+    it('suppresses thinking→done flash when thinking returns within the window', () => {
+      const { s, advance } = makeScheduler();
+      s.setState('thinking');
+      advance(100);
+
+      // Stop fires → resolver returns 'done'. Should be held, not applied.
+      s.setState('done');
+      advance(200);
+      expect(s.computeFrame()!.rgb).toEqual({ r: 88, g: 166, b: 255 });
+
+      // Next PreToolUse re-primes 'thinking' before the window expires.
+      s.setState('thinking');
+      advance(600);
+      // Light stayed on thinking the whole time — no green ever rendered.
+      expect(s.computeFrame()!.rgb).toEqual({ r: 88, g: 166, b: 255 });
+    });
+
+    it('repeat setState(done) calls during the window do not slip through', () => {
+      // Regression: the 4 Hz resolveTicker fires setState('done') ~250ms
+      // apart while the resolver still sees lastDoneTs >= lastWorkEventTs.
+      // The first call parks; subsequent calls used to fall through the
+      // pendingDoneAt guard and immediately flip state to 'done',
+      // producing the flash this whole coalesce mechanism was meant to
+      // prevent.
+      const { s, advance } = makeScheduler();
+      s.setState('thinking');
+      advance(100);
+
+      s.setState('done');
+      advance(250);
+      s.setState('done');
+      advance(250);
+      s.setState('done');
+      advance(250);
+      // Still thinking — the only state we should have rendered.
+      expect(s.computeFrame()!.rgb).toEqual({ r: 88, g: 166, b: 255 });
+
+      // Now thinking re-asserts before window expiry → cancel.
+      s.setState('thinking');
+      advance(2500);
+      expect(s.computeFrame()!.rgb).toEqual({ r: 88, g: 166, b: 255 });
+    });
+
+    it('applies done after the coalesce window expires with no contradicting state', () => {
+      const { s, advance } = makeScheduler();
+      s.setState('thinking');
+      advance(100);
+
+      s.setState('done');
+      // Within the window → still thinking.
+      advance(2000);
+      expect(s.computeFrame()!.rgb).toEqual({ r: 88, g: 166, b: 255 });
+
+      // After the 3000ms window → done applied.
+      advance(1100);
+      expect(s.computeFrame()!.rgb).toEqual({ r: 126, g: 231, b: 135 });
+    });
+
+    it('does not coalesce when previous state is not thinking', () => {
+      const { s, advance } = makeScheduler();
+      s.setState('ready');
+      advance(100);
+
+      s.setState('done');
+      // ready→done isn't a mid-loop case; apply immediately.
+      expect(s.computeFrame()!.rgb).toEqual({ r: 126, g: 231, b: 135 });
+    });
+
+    it('honors doneCoalesceMs: 0 (disabled)', () => {
+      const { s } = makeScheduler({ doneCoalesceMs: 0 });
+      s.setState('thinking');
+      s.setState('done');
+      expect(s.computeFrame()!.rgb).toEqual({ r: 126, g: 231, b: 135 });
+    });
+  });
+
   describe('adapter failure handling', () => {
     it('calls onError on adapter failure', async () => {
       const errors: unknown[] = [];

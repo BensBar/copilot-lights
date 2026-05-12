@@ -11,6 +11,17 @@ export interface SchedulerOptions {
   now?: () => number;
   /** Logger callback for adapter errors (default: console.warn). */
   onError?: (err: unknown) => void;
+  /**
+   * "Done coalescing window": when the resolver flips `thinking` →
+   * `done`, hold `thinking` for this long instead of applying `done`
+   * immediately. If a subsequent `setState('thinking')` arrives within
+   * the window (which happens mid agent-loop: Stop fires between tool
+   * batches and the next PreToolUse re-primes within tens of ms), the
+   * pending `done` is cancelled and the light never flashes green.
+   * If no contradicting state arrives, the `done` is applied when the
+   * window expires. Set to 0 to disable. Default 3000ms.
+   */
+  doneCoalesceMs?: number;
 }
 
 /**
@@ -27,10 +38,19 @@ export class Scheduler {
   private readonly fps: number;
   private readonly now: () => number;
   private readonly onError: (err: unknown) => void;
+  private readonly doneCoalesceMs: number;
 
   private state: LightState = 'off';
   private stateChangedAt: number = 0;
   private previousState: LightState = 'off';
+
+  /**
+   * When set, a `done` state is being held back because we recently
+   * transitioned away from `thinking`. The scheduler stays on
+   * `thinking` until `pendingDoneAt` is reached, at which point `done`
+   * is applied. Any non-`done` `setState` clears this.
+   */
+  private pendingDoneAt: number | null = null;
   
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<void> | null = null;
@@ -49,6 +69,7 @@ export class Scheduler {
     this.fps = opts?.fps ?? 10;
     this.now = opts?.now ?? (() => Date.now());
     this.onError = opts?.onError ?? ((err) => console.warn('Scheduler adapter error:', err));
+    this.doneCoalesceMs = opts?.doneCoalesceMs ?? 3000;
   }
 
   /** Begin emitting frames. Idempotent. */
@@ -82,6 +103,29 @@ export class Scheduler {
 
   /** Set the desired light state. The next frame will start fading toward it. */
   setState(state: LightState): void {
+    // Done-coalescing: an agent loop fires Stop between tool batches and
+    // re-primes thinking ~tens of ms later via the next PreToolUse. The
+    // gap between those two events resolves to `done` and would flash
+    // green for a single frame mid-loop. Hold `done` for
+    // `doneCoalesceMs` after a thinking→done transition; if a non-done
+    // state arrives in that window (typically thinking), discard the
+    // pending done entirely.
+    if (this.doneCoalesceMs > 0) {
+      if (state === 'done' && this.state === 'thinking') {
+        if (this.pendingDoneAt === null) {
+          this.pendingDoneAt = this.now() + this.doneCoalesceMs;
+        }
+        // Already parked — ignore repeat done calls from the 4Hz
+        // resolve ticker until either the window expires (tick()
+        // releases) or a non-done state cancels it.
+        return;
+      }
+      if (state !== 'done' && this.pendingDoneAt !== null) {
+        // Loop continued — cancel the pending done flash.
+        this.pendingDoneAt = null;
+      }
+    }
+
     if (this.state !== state) {
       this.state = state;
       this.stateChangedAt = this.now();
@@ -211,6 +255,17 @@ export class Scheduler {
 
   private tick(): void {
     const timestamp = this.now();
+
+    // Release any pending coalesced `done` whose window has expired
+    // without a contradicting state arriving.
+    if (this.pendingDoneAt !== null && timestamp >= this.pendingDoneAt) {
+      this.pendingDoneAt = null;
+      if (this.state !== 'done') {
+        this.state = 'done';
+        this.stateChangedAt = timestamp;
+        this.transitionPending = true;
+      }
+    }
 
     // If adapter is in backoff, don't emit
     if (timestamp < this.nextRetryAt) {
