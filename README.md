@@ -14,6 +14,13 @@ Other adapters slot in behind one `LightAdapter` interface. On macOS you also
 get a menu-bar widget that mirrors the same state, and an optional floating
 desktop orb.
 
+<p align="center">
+  <img src="./assets/screenshots/widget-ready.jpg"           alt="floating widget: ready (green, smiling)"           width="220" />
+  <img src="./assets/screenshots/widget-thinking.jpg"        alt="floating widget: thinking (purple, neutral)"       width="220" />
+  <img src="./assets/screenshots/widget-awaiting-input.jpg"  alt="floating widget: awaiting input (amber, neutral)"  width="220" />
+</p>
+<p align="center"><sub>Floating desktop widget — <code>ready</code>, <code>thinking</code>, <code>awaiting input</code>. The menu-bar mark mirrors the same state.</sub></p>
+
 - [Quick start](#quick-start)
 - [Install](#install)
   - [One-line installer](#one-line-installer-macos--linux)
@@ -268,6 +275,10 @@ The mark expression reflects the current state:
 
 To build and install just the app, see [Just the macOS menu-bar
 app](#just-the-macos-menu-bar-app) above.
+
+<p align="center">
+  <img src="./assets/screenshots/settings-adapter.jpg" alt="Copilot Lights Settings window — Adapter pane" width="720" />
+</p>
 
 From the menu-bar icon → **Settings…** you can:
 
