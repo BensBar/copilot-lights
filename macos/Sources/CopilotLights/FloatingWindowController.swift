@@ -147,7 +147,8 @@ struct FloatingWindowRoot: View {
                     colorHex: viewModel.color,
                     brightness: viewModel.brightness,
                     size: 56,
-                    online: viewModel.online
+                    online: viewModel.online,
+                    state: viewModel.state
                 )
                 Text(viewModel.online ? viewModel.state.replacingOccurrences(of: "_", with: " ").capitalized : "Offline")
                     .font(.headline)

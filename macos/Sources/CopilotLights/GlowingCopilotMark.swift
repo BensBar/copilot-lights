@@ -15,11 +15,22 @@ struct GlowingCopilotMark: View {
     let size: CGFloat
     /// When false, the mark is drawn desaturated and the glow is suppressed.
     let online: Bool
+    /// Resolved daemon state name (e.g. "ready", "thinking", "error").
+    /// Drives the mouth expression so the widget smiles when ready and
+    /// frowns on error, matching the menu-bar icon.
+    let state: String
 
-    private var tint: Color {
-        guard online else { return Color(white: 0.55) }
-        return Color(hex: colorHex) ?? Color(white: 0.55)
+    private var tint: NSColor {
+        let base: Color
+        if online, let parsed = Color(hex: colorHex) {
+            base = parsed
+        } else {
+            base = Color(white: 0.55)
+        }
+        return NSColor(base)
     }
+
+    private var tintSwiftUI: Color { Color(nsColor: tint) }
 
     /// Glow opacity scales with brightness so dim states (`ready` at 30%)
     /// don't bloom as aggressively as bright ones (`error` at 85%, `awaiting`
@@ -37,16 +48,19 @@ struct GlowingCopilotMark: View {
                 // Two-layer glow: a wide soft halo + a tighter bloom right
                 // around the silhouette.
                 Circle()
-                    .fill(tint.opacity(glowOpacity * 0.55))
+                    .fill(tintSwiftUI.opacity(glowOpacity * 0.55))
                     .frame(width: size * 1.55, height: size * 1.55)
                     .blur(radius: size * 0.45)
                 Circle()
-                    .fill(tint.opacity(glowOpacity))
+                    .fill(tintSwiftUI.opacity(glowOpacity))
                     .frame(width: size * 1.05, height: size * 1.05)
                     .blur(radius: size * 0.22)
             }
 
-            CopilotMarkImage(tint: tint)
+            CopilotMarkPathView(
+                tint: tint,
+                mouth: online ? CopilotMarkPath.Mouth.for(state: state) : .neutral
+            )
                 .frame(width: size, height: size)
                 .accessibilityHidden(true)
         }
@@ -54,36 +68,36 @@ struct GlowingCopilotMark: View {
     }
 }
 
-/// SwiftUI wrapper that renders the bundled `copilot-mark.svg` template
-/// silhouette filled with the given color. Same compositing trick as
-/// `StatusItemController.drawTintedMark` so the menubar and floating window
-/// always look like the same icon in the same color.
-private struct CopilotMarkImage: View {
-    let tint: Color
+/// SwiftUI wrapper around an NSView that fills `CopilotMarkPath` with the
+/// requested tint and mouth expression. We render via NSBezierPath rather
+/// than the bundled SVG so the smile/frown geometry — which only lives in
+/// `CopilotMarkPath` — actually shows up in the floating widget.
+private struct CopilotMarkPathView: NSViewRepresentable {
+    let tint: NSColor
+    let mouth: CopilotMarkPath.Mouth
 
-    var body: some View {
-        if let template = CopilotMarkAsset.shared.image {
-            Canvas { ctx, size in
-                let rect = CGRect(origin: .zero, size: size)
-                ctx.draw(Image(nsImage: template), in: rect)
-                ctx.fill(
-                    Path(rect),
-                    with: .color(tint),
-                    style: FillStyle()
-                )
-            }
-            .compositingGroup()
-            .mask(
-                Image(nsImage: template)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
-            )
-        } else {
-            Image(systemName: "cpu")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .foregroundStyle(tint)
+    func makeNSView(context: Context) -> MarkView {
+        let view = MarkView()
+        view.tint = tint
+        view.mouth = mouth
+        return view
+    }
+
+    func updateNSView(_ nsView: MarkView, context: Context) {
+        nsView.tint = tint
+        nsView.mouth = mouth
+        nsView.needsDisplay = true
+    }
+
+    final class MarkView: NSView {
+        var tint: NSColor = .labelColor { didSet { needsDisplay = true } }
+        var mouth: CopilotMarkPath.Mouth = .neutral { didSet { needsDisplay = true } }
+
+        override var isFlipped: Bool { false }
+
+        override func draw(_ dirtyRect: NSRect) {
+            tint.setFill()
+            CopilotMarkPath.path(in: bounds, mouth: mouth).fill()
         }
     }
 }

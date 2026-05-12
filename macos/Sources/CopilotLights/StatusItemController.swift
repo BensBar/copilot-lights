@@ -165,11 +165,7 @@ class StatusItemController: ObservableObject {
     /// awaiting_input, done) read as "neutral working face" rather
     /// than over-emoting.
     private func mouthFor(state: String) -> CopilotMarkPath.Mouth {
-        switch state {
-        case "ready": return .smile
-        case "error": return .frown
-        default:      return .neutral
-        }
+        CopilotMarkPath.Mouth.for(state: state)
     }
     
     private func drawFallbackCircle(rect: NSRect, rgb: RGBColor, brightness: Int) {

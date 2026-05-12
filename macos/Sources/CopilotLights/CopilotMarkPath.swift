@@ -21,6 +21,19 @@ enum CopilotMarkPath {
         case neutral
         case smile
         case frown
+
+        /// Map the resolved daemon state name to a mouth expression.
+        /// Ready is a smile, error is a frown; everything in between
+        /// (thinking, awaiting_input, done) is the neutral slot so the
+        /// active states don't over-emote. Shared by the menu-bar
+        /// status item and the floating widget so they always match.
+        static func `for`(state: String) -> Mouth {
+            switch state {
+            case "ready": return .smile
+            case "error": return .frown
+            default:      return .neutral
+            }
+        }
     }
 
     /// Build a single even-odd path that, when filled, draws the Copilot mark
