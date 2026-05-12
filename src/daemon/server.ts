@@ -59,6 +59,12 @@ export interface DaemonOptions {
    * Settings UI edits. Optional; reload is a no-op when not set.
    */
   configPath?: string | null;
+  /**
+   * Path to the sessions persistence file. Forwarded into a freshly-
+   * constructed aggregator when `opts.aggregator` is not provided. When
+   * undefined (the default in tests), persistence is disabled.
+   */
+  sessionsFilePath?: string;
 }
 
 export class Daemon {
@@ -100,6 +106,9 @@ export class Daemon {
       errorTtlMs: this.config.errorTtlMs,
       doneTtlMs: this.config.doneTtlMs,
       now: this.now,
+      sessionsFilePath: opts.sessionsFilePath,
+      onPersistError: (err) =>
+        this.log('warn', `Sessions persist error: ${err instanceof Error ? err.message : String(err)}`),
     });
 
     this.scheduler = opts.scheduler ?? new Scheduler(
@@ -187,6 +196,10 @@ export class Daemon {
     // Stop scheduler
     this.scheduler.stop();
     this.stopResolveTicker();
+
+    // Flush any pending session persistence write so SIGTERM doesn't
+    // discard the last debounce-window of state.
+    this.aggregator.flushPersistSync();
 
     // Restore adapter if no active sessions and config allows
     const snapshot = this.aggregator.snapshot();

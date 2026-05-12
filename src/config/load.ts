@@ -45,6 +45,16 @@ export function defaultSocketPath(): string {
   return resolve(homedir(), '.copilot-lights', 'sock');
 }
 
+/**
+ * Default location for the on-disk session persistence file. Lives next
+ * to the config dir (NOT under XDG_RUNTIME_DIR, which is tmpfs and gets
+ * wiped at logout — defeating the whole point of persistence across
+ * daemon restarts).
+ */
+export function defaultSessionsPath(): string {
+  return resolve(homedir(), '.copilot-lights', 'sessions.json');
+}
+
 function resolveEnvRefs(obj: unknown): unknown {
   if (typeof obj === 'string') {
     if (obj.startsWith('env:')) {

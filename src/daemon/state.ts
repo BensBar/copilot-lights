@@ -1,5 +1,8 @@
 export type LightState = 'ready' | 'thinking' | 'awaiting_input' | 'error' | 'done' | 'off';
 
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs';
+import { dirname } from 'node:path';
+
 /** PascalCase event names matching what we receive from Copilot CLI. */
 export type HookEvent =
   | 'SessionStart' | 'SessionEnd'
@@ -34,6 +37,15 @@ export interface HookMessage {
  * shape lets the aggregator merge those events back into the parent.
  */
 const TOOLU_SESSION_RE = /^toolu_[A-Za-z0-9]+$/;
+
+const PERSIST_VERSION = 1;
+
+interface PersistedSessions {
+  version: number;
+  savedAt: number;
+  followedSessionId: string | null;
+  sessions: SessionState[];
+}
 
 export interface AggregatorOptions {
   errorTtlMs?: number;
@@ -78,6 +90,20 @@ export interface AggregatorOptions {
   autopilotThreshold?: number;
   /** Time source — injected for testability. Default Date.now. */
   now?: () => number;
+  /**
+   * Path to a JSON file used to persist session state across daemon
+   * restarts. When set, the aggregator loads on construction and writes
+   * (atomically, debounced) after each `apply` / decay mutation. Without
+   * this, restarting the daemon zeroes the in-memory session map and
+   * idle sessions stay invisible until they next fire a hook. Failures
+   * are logged via `onPersistError` and never propagated — light
+   * reliability is more important than session persistence.
+   */
+  sessionsFilePath?: string;
+  /** Debounce window for persistence writes. Default 500ms. */
+  persistDebounceMs?: number;
+  /** Called when a load / save fails. Default: silent. */
+  onPersistError?: (err: unknown) => void;
 }
 
 /** Precedence used for tie-breaking (documented for tests). */
@@ -175,6 +201,14 @@ export class StateAggregator {
    * across all of them. Cuts cross-session noise when the user has many
    * Copilot windows open and only cares about one. null = aggregate all. */
   private followSessionId: string | null = null;
+  private readonly sessionsFilePath: string | null;
+  private readonly persistDebounceMs: number;
+  private readonly onPersistError: (err: unknown) => void;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Bumped on every state mutation; persisted file is tagged with the last
+   * version it captured so we never write stale state on top of newer. */
+  private persistVersion = 0;
+  private lastPersistedVersion = 0;
 
   constructor(opts?: AggregatorOptions) {
     this.errorTtlMs = opts?.errorTtlMs ?? 4000;
@@ -185,6 +219,102 @@ export class StateAggregator {
     this.thinkingHoldMs = opts?.thinkingHoldMs ?? 4000;
     this.autopilotThreshold = opts?.autopilotThreshold ?? 2;
     this.now = opts?.now ?? (() => Date.now());
+    this.sessionsFilePath = opts?.sessionsFilePath ?? null;
+    this.persistDebounceMs = opts?.persistDebounceMs ?? 500;
+    this.onPersistError = opts?.onPersistError ?? (() => { /* silent */ });
+    if (this.sessionsFilePath !== null) {
+      this.loadSessionsSync(this.sessionsFilePath);
+    }
+  }
+
+  /**
+   * Load persisted sessions from disk. Errors are swallowed (logged via
+   * onPersistError) — a missing or corrupt sessions file should never
+   * prevent the daemon from starting.
+   */
+  private loadSessionsSync(path: string): void {
+    let raw: string;
+    try {
+      raw = readFileSync(path, 'utf8');
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code !== 'ENOENT') this.onPersistError(err);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as PersistedSessions;
+      if (parsed.version !== PERSIST_VERSION) return;
+      const now = this.now();
+      for (const s of parsed.sessions) {
+        // Drop sessions that would have been GC'd by the idle TTL — they
+        // would be removed on the next collectActiveSessions anyway, but
+        // skipping them at load time keeps the file from accumulating
+        // long-dead entries.
+        if (now - s.lastEventTs >= this.sessionIdleTtlMs) continue;
+        this.sessions.set(s.id, { ...s });
+      }
+      if (parsed.followedSessionId && this.sessions.has(parsed.followedSessionId)) {
+        this.followSessionId = parsed.followedSessionId;
+      }
+    } catch (err) {
+      this.onPersistError(err);
+    }
+  }
+
+  /**
+   * Schedule a debounced atomic write of the current session map. Called
+   * after every mutation; coalesces bursts (a single PreToolUse →
+   * PermissionRequest → PostToolUse triple is one write, not three).
+   */
+  private schedulePersist(): void {
+    if (this.sessionsFilePath === null) return;
+    this.persistVersion++;
+    if (this.persistTimer !== null) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.flushPersistSync();
+    }, this.persistDebounceMs);
+    if (typeof (this.persistTimer as unknown as { unref?: () => void }).unref === 'function') {
+      (this.persistTimer as unknown as { unref: () => void }).unref();
+    }
+  }
+
+  /**
+   * Flush any pending debounced write immediately. Called on daemon
+   * shutdown so SIGTERM doesn't drop the last few seconds of state.
+   * Safe to call even when no write is pending.
+   */
+  flushPersistSync(): void {
+    if (this.sessionsFilePath === null) return;
+    if (this.persistVersion === this.lastPersistedVersion) return;
+    if (this.persistTimer !== null) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    const captured = this.persistVersion;
+    try {
+      const payload: PersistedSessions = {
+        version: PERSIST_VERSION,
+        savedAt: this.now(),
+        followedSessionId: this.followSessionId,
+        sessions: Array.from(this.sessions.values()),
+      };
+      const json = JSON.stringify(payload);
+      const dir = dirname(this.sessionsFilePath);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const tmp = `${this.sessionsFilePath}.tmp-${process.pid}`;
+      const fd = openSync(tmp, 'w', 0o600);
+      try {
+        writeSync(fd, json);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, this.sessionsFilePath);
+      this.lastPersistedVersion = captured;
+    } catch (err) {
+      this.onPersistError(err);
+    }
   }
 
   /** Apply one hook message. Idempotent on duplicates with same ts. */
@@ -220,6 +350,7 @@ export class StateAggregator {
 
     if (msg.event === 'SessionEnd') {
       this.sessions.delete(sessionId);
+      this.schedulePersist();
       return;
     }
 
@@ -239,6 +370,7 @@ export class StateAggregator {
           autopilotDetected: false,
         };
         this.sessions.set(sessionId, session);
+        this.schedulePersist();
         return;
       } else {
         // Treat as implicit SessionStart
@@ -468,6 +600,7 @@ export class StateAggregator {
         session.lastErrorTs = ts;
         break;
     }
+    this.schedulePersist();
   }
 
   /** Compute the resolved global LightState given the current time. */
@@ -495,7 +628,9 @@ export class StateAggregator {
 
   /** Set or clear the followed session id. Pass null to aggregate all. */
   setFollowedSession(id: string | null): void {
+    if (this.followSessionId === id) return;
     this.followSessionId = id;
+    this.schedulePersist();
   }
 
   /** Currently followed session id, if any. */

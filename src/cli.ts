@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, defaultSocketPath } from './config/load.js';
+import { loadConfig, defaultSocketPath, defaultSessionsPath } from './config/load.js';
 import { createAdapter } from './adapters/registry.js';
 import { Daemon } from './daemon/server.js';
 import { mainHook } from './bridge/hook-bin.js';
@@ -598,15 +598,21 @@ export interface DaemonOptions {
   socketPath: string;
   signals?: NodeJS.Signals[];
   configPath?: string | null;
+  /** Override the on-disk sessions-store path. Pass null to disable persistence. */
+  sessionsFilePath?: string | null;
 }
 
 export async function cmdDaemon(opts: DaemonOptions): Promise<Daemon> {
   const adapter = createAdapter(opts.config);
+  const sessionsFilePath = opts.sessionsFilePath === null
+    ? undefined
+    : (opts.sessionsFilePath ?? defaultSessionsPath());
   const daemon = new Daemon({
     config: opts.config,
     adapter,
     socketPath: opts.socketPath,
     configPath: opts.configPath ?? null,
+    sessionsFilePath,
   });
 
   await daemon.start();
