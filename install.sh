@@ -81,6 +81,11 @@ if [[ "$OS" == "Darwin" && "$SKIP_MENUBAR" != "1" ]]; then
     rm -rf "$APP_DEST"
   fi
   cp -R "$APP_SRC" "$APP_DEST"
+  # Strip any quarantine xattr (the install script just built the bundle
+  # locally, but a fresh `cp -R` can still inherit one) so first-launch
+  # Gatekeeper doesn't show a "cannot be opened" dialog on the ad-hoc
+  # signed bundle.
+  xattr -cr "$APP_DEST" 2>/dev/null || true
   # Register Launch at Login via launchctl (LSUIElement app, so no Dock icon).
   PLIST="$HOME/Library/LaunchAgents/com.copilot-lights.app.plist"
   mkdir -p "$(dirname "$PLIST")"

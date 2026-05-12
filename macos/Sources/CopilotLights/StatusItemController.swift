@@ -31,32 +31,9 @@ class StatusItemController: ObservableObject {
     private var currentState: String = "off"
     private var animationPhase: Double = 0
 
-    private var copilotMarkTemplate: NSImage?
-
     init(daemonClient: DaemonClient, configStore: ConfigStore) {
         self.daemonClient = daemonClient
         self.configStore = configStore
-        self.copilotMarkTemplate = Self.loadCopilotMark()
-    }
-    
-    private static func loadCopilotMark() -> NSImage? {
-        // For .app bundle: Resources are in Contents/Resources/
-        if let resourcePath = Bundle.main.resourcePath {
-            let svgPath = (resourcePath as NSString).appendingPathComponent("copilot-mark.svg")
-            if let image = NSImage(contentsOfFile: svgPath) {
-                return image
-            }
-        }
-        
-        // For SwiftPM resource bundles
-        let bundleName = "CopilotLights_CopilotLights.bundle"
-        if let bundleURL = Bundle.main.resourceURL?.appendingPathComponent(bundleName),
-           let bundle = Bundle(url: bundleURL),
-           let url = bundle.url(forResource: "copilot-mark", withExtension: "svg") {
-            return NSImage(contentsOf: url)
-        }
-        
-        return nil
     }
     
     func setup() {
@@ -162,11 +139,7 @@ class StatusItemController: ObservableObject {
             let inset: CGFloat = 3
             let markRect = rect.insetBy(dx: inset, dy: inset)
 
-            if let template = self.copilotMarkTemplate {
-                self.drawTintedMark(template: template, rect: markRect, rgb: rgb, brightness: brightness)
-            } else {
-                self.drawFallbackCircle(rect: markRect, rgb: rgb, brightness: brightness)
-            }
+            self.drawTintedMark(rect: markRect, rgb: rgb, brightness: brightness)
             return true
         }
 
@@ -174,18 +147,29 @@ class StatusItemController: ObservableObject {
         statusItem?.button?.image = image
     }
     
-    private func drawTintedMark(template: NSImage, rect: NSRect, rgb: RGBColor, brightness: Int) {
+    private func drawTintedMark(rect: NSRect, rgb: RGBColor, brightness: Int) {
         let tintColor = NSColor(
             red: CGFloat(rgb.r) / 255.0,
             green: CGFloat(rgb.g) / 255.0,
             blue: CGFloat(rgb.b) / 255.0,
             alpha: CGFloat(brightness) / 100.0
         )
-        
-        template.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
-        
+
         tintColor.setFill()
-        rect.fill(using: .sourceIn)
+        CopilotMarkPath.path(in: rect, mouth: mouthFor(state: currentState)).fill()
+    }
+
+    /// Map the resolved daemon state name to a mouth expression. Ready
+    /// is a smile, error is a frown; everything in between is the
+    /// original flat slot so the active states (thinking,
+    /// awaiting_input, done) read as "neutral working face" rather
+    /// than over-emoting.
+    private func mouthFor(state: String) -> CopilotMarkPath.Mouth {
+        switch state {
+        case "ready": return .smile
+        case "error": return .frown
+        default:      return .neutral
+        }
     }
     
     private func drawFallbackCircle(rect: NSRect, rgb: RGBColor, brightness: Int) {
