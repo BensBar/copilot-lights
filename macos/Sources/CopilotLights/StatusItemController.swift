@@ -122,24 +122,16 @@ class StatusItemController: ObservableObject {
     }
     
     private func setIcon(rgb: RGBColor, brightness: Int) {
-        // 22×22 to fill the full menubar height. We render a black rounded-
-        // square tile and inset the Copilot mark inside it so the logo reads
-        // as a coherent badge against any wallpaper or menubar tint, light
-        // or dark, rather than a floating glyph that disappears on busy
-        // backgrounds.
+        // Fill the full menubar height with the mark itself — no black tile
+        // backdrop. The tile used to act as a frame against busy wallpapers
+        // but it made the icon read as a small dim glyph stuck inside a
+        // box. Drawing the silhouette directly at 22×22 reads bigger and
+        // brighter, and macOS already composites status-bar icons against
+        // the menubar's own backdrop blur.
         let size = NSSize(width: 22, height: 22)
 
         let image = NSImage(size: size, flipped: false) { rect in
-            // Black rounded-square tile.
-            let tile = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
-            NSColor.black.setFill()
-            tile.fill()
-
-            // Inset the mark so the tile shows as a frame around it.
-            let inset: CGFloat = 3
-            let markRect = rect.insetBy(dx: inset, dy: inset)
-
-            self.drawTintedMark(rect: markRect, rgb: rgb, brightness: brightness)
+            self.drawTintedMark(rect: rect, rgb: rgb, brightness: brightness)
             return true
         }
 
@@ -148,11 +140,20 @@ class StatusItemController: ObservableObject {
     }
     
     private func drawTintedMark(rect: NSRect, rgb: RGBColor, brightness: Int) {
+        // Keep the mark crisp on the menubar regardless of the configured
+        // bulb brightness. The brightness slider is meant for the physical
+        // light — applying it 1:1 to the icon's alpha made dim states
+        // (ready @ 30%) almost invisible. Floor at 0.85 so the silhouette
+        // always reads, and let brightness only nudge it toward fully
+        // opaque from there.
+        let b = max(0, min(100, brightness))
+        let alpha = 0.85 + (CGFloat(b) / 100.0) * 0.15
+
         let tintColor = NSColor(
             red: CGFloat(rgb.r) / 255.0,
             green: CGFloat(rgb.g) / 255.0,
             blue: CGFloat(rgb.b) / 255.0,
-            alpha: CGFloat(brightness) / 100.0
+            alpha: alpha
         )
 
         tintColor.setFill()
