@@ -46,21 +46,15 @@ struct GlowingCopilotMark: View {
         ZStack {
             if online {
                 // Two-layer glow: a wide soft halo + a tighter bloom right
-                // around the silhouette. Rasterize into one Metal-backed
-                // layer with .drawingGroup() so the blur edge doesn't
-                // sparkle / show blue dithering grains as the desktop
-                // behind the widget repaints.
-                ZStack {
-                    Circle()
-                        .fill(tintSwiftUI.opacity(glowOpacity * 0.55))
-                        .frame(width: size * 1.55, height: size * 1.55)
-                        .blur(radius: size * 0.45)
-                    Circle()
-                        .fill(tintSwiftUI.opacity(glowOpacity))
-                        .frame(width: size * 1.05, height: size * 1.05)
-                        .blur(radius: size * 0.22)
-                }
-                .drawingGroup(opaque: false, colorMode: .extendedLinear)
+                // around the silhouette.
+                Circle()
+                    .fill(tintSwiftUI.opacity(glowOpacity * 0.55))
+                    .frame(width: size * 1.55, height: size * 1.55)
+                    .blur(radius: size * 0.45)
+                Circle()
+                    .fill(tintSwiftUI.opacity(glowOpacity))
+                    .frame(width: size * 1.05, height: size * 1.05)
+                    .blur(radius: size * 0.22)
             }
 
             CopilotMarkPathView(
@@ -98,6 +92,27 @@ private struct CopilotMarkPathView: NSViewRepresentable {
     final class MarkView: NSView {
         var tint: NSColor = .labelColor { didSet { needsDisplay = true } }
         var mouth: CopilotMarkPath.Mouth = .neutral { didSet { needsDisplay = true } }
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            // Layer-back the view so SwiftUI's compositor treats it as a
+            // single opaque-alpha surface. Without this the host
+            // NSHostingView re-renders our draw(_:) output against the
+            // transparent panel each frame, which on macOS produces
+            // scattered colored grains around the silhouette — looks
+            // like blue dots flickering outside the widget.
+            wantsLayer = true
+            layer?.isOpaque = false
+            layer?.backgroundColor = .clear
+            layer?.drawsAsynchronously = false
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            wantsLayer = true
+            layer?.isOpaque = false
+            layer?.backgroundColor = .clear
+        }
 
         override var isFlipped: Bool { false }
 
