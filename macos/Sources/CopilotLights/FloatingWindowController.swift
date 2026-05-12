@@ -59,16 +59,21 @@ final class FloatingWindowController {
         let host = NSHostingView(rootView: FloatingWindowRoot(viewModel: viewModel, configStore: configStore))
         panel.contentView = host
 
-        // Persist frame changes.
+        // Persist frame changes. Capture `self` into a local before the
+        // Task so the strict-concurrency checker sees a stable binding
+        // rather than the mutable `[weak self]` optional being read
+        // inside the nonisolated closure.
         let observer = NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification, object: panel, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.persistFrame() }
+            guard let self = self else { return }
+            Task { @MainActor in self.persistFrame() }
         }
         let resObs = NotificationCenter.default.addObserver(
             forName: NSWindow.didResizeNotification, object: panel, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.persistFrame() }
+            guard let self = self else { return }
+            Task { @MainActor in self.persistFrame() }
         }
         objc_setAssociatedObject(panel, "obs1", observer, .OBJC_ASSOCIATION_RETAIN)
         objc_setAssociatedObject(panel, "obs2", resObs, .OBJC_ASSOCIATION_RETAIN)

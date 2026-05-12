@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { StateAggregator } from '../../src/daemon/state.js';
@@ -43,7 +43,7 @@ describe('StateAggregator persistence', () => {
     const mode = statSync(path).mode & 0o777;
     expect(mode).toBe(0o600);
     // Ensure no temp file lingered.
-    const tmps = require('node:fs').readdirSync(dir).filter((f: string) => f.includes('.tmp'));
+    const tmps = readdirSync(dir).filter((f: string) => f.includes('.tmp'));
     expect(tmps).toEqual([]);
   });
 
