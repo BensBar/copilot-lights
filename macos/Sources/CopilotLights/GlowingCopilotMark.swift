@@ -46,15 +46,21 @@ struct GlowingCopilotMark: View {
         ZStack {
             if online {
                 // Two-layer glow: a wide soft halo + a tighter bloom right
-                // around the silhouette.
-                Circle()
-                    .fill(tintSwiftUI.opacity(glowOpacity * 0.55))
-                    .frame(width: size * 1.55, height: size * 1.55)
-                    .blur(radius: size * 0.45)
-                Circle()
-                    .fill(tintSwiftUI.opacity(glowOpacity))
-                    .frame(width: size * 1.05, height: size * 1.05)
-                    .blur(radius: size * 0.22)
+                // around the silhouette. Rasterize into one Metal-backed
+                // layer with .drawingGroup() so the blur edge doesn't
+                // sparkle / show blue dithering grains as the desktop
+                // behind the widget repaints.
+                ZStack {
+                    Circle()
+                        .fill(tintSwiftUI.opacity(glowOpacity * 0.55))
+                        .frame(width: size * 1.55, height: size * 1.55)
+                        .blur(radius: size * 0.45)
+                    Circle()
+                        .fill(tintSwiftUI.opacity(glowOpacity))
+                        .frame(width: size * 1.05, height: size * 1.05)
+                        .blur(radius: size * 0.22)
+                }
+                .drawingGroup(opaque: false, colorMode: .extendedLinear)
             }
 
             CopilotMarkPathView(
