@@ -51,8 +51,21 @@ final class FloatingWindowController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        // .statusBar (higher than .floating) + .fullScreenAuxiliary tells
+        // macOS to treat the widget as a HUD accessory rather than an
+        // ordinary window. Without this, Stage Manager treats the panel
+        // as part of the active stage and decorates it with small
+        // accent-colored indicators (window-stack badges, focus dots)
+        // that appear in different spots near the widget as state
+        // updates — exactly the "blue dots flickering around the widget"
+        // we've been chasing.
+        panel.level = .statusBar
+        panel.collectionBehavior = [
+            .canJoinAllSpaces,
+            .stationary,
+            .ignoresCycle,
+            .fullScreenAuxiliary
+        ]
         panel.isMovableByWindowBackground = true
         panel.hidesOnDeactivate = false
 
