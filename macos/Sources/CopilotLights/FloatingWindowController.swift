@@ -57,6 +57,15 @@ final class FloatingWindowController {
         panel.hidesOnDeactivate = false
 
         let host = NSHostingView(rootView: FloatingWindowRoot(viewModel: viewModel, configStore: configStore))
+        // Force the hosting view into a single layer-backed surface so
+        // SwiftUI updates inside it don't leave behind un-invalidated
+        // compositing tiles in the transparent panel margins (which on
+        // macOS show up as solid system-accent-colored squares
+        // flickering near the widget).
+        host.wantsLayer = true
+        host.layer?.isOpaque = false
+        host.layer?.backgroundColor = .clear
+        host.layer?.masksToBounds = true
         panel.contentView = host
 
         // Persist frame changes. Capture `self` into a local before the
@@ -165,6 +174,12 @@ struct FloatingWindowRoot: View {
             .padding(.vertical, 12)
         }
         .frame(minWidth: 160, minHeight: 140)
+        // Suppress implicit SwiftUI animations on every viewModel update.
+        // Daemon polls re-publish color / brightness / session list a few
+        // times a second; the default animation transactions can leave
+        // behind small accent-colored tiles in the transparent panel
+        // margins as layout shifts occur.
+        .transaction { $0.animation = nil }
     }
 
     /// Compact "★ Following <name> ⓧ" pill shown whenever a single session is
