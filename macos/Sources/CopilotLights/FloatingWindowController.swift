@@ -139,9 +139,14 @@ struct FloatingWindowRoot: View {
 
     var body: some View {
         ZStack {
+            // Solid dark fill — no .ultraThinMaterial underneath. The
+            // system vibrancy material has a faint blue cast plus visible
+            // dithering noise that "flickers" as the desktop / animations
+            // behind the widget change. A near-opaque dark rounded rect
+            // mimics the look we wanted from the material without the
+            // sparkle.
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.black.opacity(0.55))
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .fill(Color(white: 0.08).opacity(0.92))
             VStack(spacing: 6) {
                 GlowingCopilotMark(
                     colorHex: viewModel.color,
