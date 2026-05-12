@@ -44,7 +44,7 @@ final class FloatingWindowController {
         let frame = ui.floatingWindowFrame
         let panel = NSPanel(
             contentRect: frame,
-            styleMask: [.borderless, .nonactivatingPanel, .resizable],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
