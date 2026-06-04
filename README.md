@@ -205,6 +205,7 @@ copilot-lights install [--statusline] # wire hooks into ~/.copilot/hooks.json (i
 copilot-lights uninstall              # remove our entries from hooks.json + settings.json
 copilot-lights status [--json]        # query the running daemon over the socket
 copilot-lights doctor                 # check config/hooks/daemon/autostart and report what's broken
+copilot-lights acp-run [-- <args>]    # launch Copilot in ACP mode and drive lights from its event stream
 copilot-lights statusline             # internal — prints one line for Copilot's footer
 copilot-lights enable-autostart       # generate launchd/systemd unit (does not load it)
 copilot-lights disable-autostart      # delete the unit file
@@ -248,11 +249,51 @@ your config (loopback-only, off by default):
 
 This lets non-CLI sources drive the lights — see the next section.
 
+## Two event sources: transparent hooks vs. ACP
+
+copilot-lights can learn what Copilot is doing two different ways. They are
+not mutually exclusive, and **hooks are the default** — `acp-run` is an
+opt-in upgrade for users who want maximum fidelity.
+
+| | **Hooks (default)** | **ACP (`acp-run`)** |
+|---|---|---|
+| How you start Copilot | Run `copilot` normally; hooks fire transparently | Launch *through* us: `copilot-lights acp-run` |
+| Event quality | Fire-and-forget, sometimes unreliable / out-of-order; `Stop` not always emitted | Authoritative, ordered, single connection; real session ids and a definitive turn-end |
+| Setup | `copilot-lights install` once, then forget it | Start each session via `acp-run` (or an ACP editor) |
+| Best for | Zero-friction always-on ambient status | Sessions where you want the lights to be exactly right |
+
+**Why two modes?** ACP is an *editor→agent* protocol: the client **spawns**
+`copilot --acp --stdio` and drives it over JSON-RPC. It is not a passive feed
+you can tap on an already-running terminal session — so it only applies when
+copilot-lights (or an ACP-speaking editor) is the thing that launched Copilot.
+That's why hooks remain the transparent default and ACP is the
+launch-through, high-fidelity path.
+
+### `copilot-lights acp-run`
+
+```bash
+# Make sure the daemon is running (or autostarted), then:
+copilot-lights acp-run                 # launches `copilot --acp --stdio`
+copilot-lights acp-run -- --model gpt-5 # pass extra args through to Copilot
+```
+
+Under the hood `acp-run` spawns Copilot in ACP mode, performs the JSON-RPC
+handshake, opens a session, and translates ACP's `session/update` /
+`tool_call` / permission / `stopReason` signals into the **same** daemon wire
+events the hooks emit — so the aggregator, scheduler, and your light adapters
+are untouched. Permission requests are surfaced as `awaiting_input` and
+answered interactively at the prompt (we never silently auto-approve a tool).
+
+`copilot-lights doctor` reports whether your installed Copilot CLI advertises
+`--acp` (it is in public preview). If it doesn't, hooks still work — `acp-run`
+is purely additive.
+
 ## What surfaces are supported?
 
 | Surface | Status | Notes |
 |---|---|---|
 | **Copilot CLI** (terminal) | ✅ Full | `~/.copilot/hooks.json` integration; all events. |
+| **Copilot CLI via ACP** | ✅ Full (opt-in) | `copilot-lights acp-run` launches `copilot --acp --stdio` and drives lights from the authoritative JSON-RPC event stream. |
 | **GitHub macOS app** (`GitHub.app`) | ⚠️ Manual | The bundled SDK in `~/Library/Caches/copilot-sdk-*/copilot` does **not** honor `~/.copilot/hooks.json`. The app does write structured logs to `~/.copilot/logs/process-*.log` — a future log-tail bridge could parse them and POST to `/event`. Tracked as future work. |
 | **VS Code Copilot Chat** | ⚠️ Manual | The Copilot Chat extension exposes no public state-change API to other extensions. A custom integration would have to register itself as a chat participant and POST state to `/event` for its own interactions only. |
 | **github.com / Copilot mobile** | ⚠️ Webhook-bridge | Server-side only. Requires a public endpoint (Cloudflare Tunnel / ngrok) and a GitHub App receiving webhook events, then POSTing to `/event`. Not shipped here. |
@@ -383,7 +424,8 @@ src/
 ├── bridge/
 │   ├── client.ts     # 200 ms-budget socket client
 │   ├── hook.ts       # event-name + stdin → minimal daemon message
-│   └── hook-bin.ts   # CLI hook entrypoint
+│   ├── hook-bin.ts   # CLI hook entrypoint
+│   └── acp/          # opt-in ACP source: JSON-RPC framer, ACP→event translator, session driver, `acp-run` launcher
 ├── autostart/        # launchd plist / systemd unit generators (no shelling out)
 ├── util/color.ts     # hex/HSV/CIE-xy + lerp + brightness scaling
 └── cli.ts            # commander program; thin wrappers around testable cmd* functions

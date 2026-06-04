@@ -12,6 +12,8 @@ export interface ClientMessage {
   ts?: number;
   toolName?: string;
   notificationType?: string;
+  /** Workspace dir the event fired from (used by the daemon's per-cwd view). */
+  cwd?: string;
   // For 'query':
   query?: 'status';
 }
