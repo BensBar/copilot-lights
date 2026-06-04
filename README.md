@@ -58,8 +58,9 @@ breathe blue while it thinks.
 
 Copilot CLI has a first-class hook system. `copilot-lights install` writes
 hook entries into `~/.copilot/hooks/copilot-lights.json` for the events we
-care about (`sessionStart`, `userPromptSubmitted`, `preToolUse`, `agentStop`,
-`notification`, `errorOccurred`, `sessionEnd`, …). Each hook fires a tiny
+care about (`sessionStart`, `userPromptSubmitted`, `preToolUse`,
+`preMcpToolCall`, `agentStop`, `notification`, `errorOccurred`,
+`sessionEnd`, …). Each hook fires a tiny
 `copilot-lights hook <event>` command that writes one JSON line to a local
 Unix socket and exits in milliseconds. A long-running daemon on the other
 end of the socket aggregates state across sessions, interpolates colors
@@ -226,9 +227,9 @@ by copilot-lights.
 `◐ thinking`, `◉ needs input`, `✖ error`, …) shows in the Copilot CLI
 footer.
 
-This requires the **`STATUS_LINE` experimental flag** to be enabled in
-your Copilot CLI build, and you must restart the CLI after install for
-it to appear. If the daemon isn't running, the line falls back to dim
+The customizable status line is now generally available in Copilot CLI
+(no experimental flag required). Restart the CLI after install for it to
+appear. If the daemon isn't running, the line falls back to dim
 `○ offline` so the footer still renders.
 
 ### Optional HTTP transport

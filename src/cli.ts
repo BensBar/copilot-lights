@@ -46,6 +46,7 @@ const EVENT_MAP: Record<string, string> = {
   sessionEnd: 'SessionEnd',
   userPromptSubmitted: 'UserPromptSubmit',
   preToolUse: 'PreToolUse',
+  preMcpToolCall: 'PreMcpToolCall',
   postToolUse: 'PostToolUse',
   postToolUseFailure: 'PostToolUseFailure',
   errorOccurred: 'ErrorOccurred',
