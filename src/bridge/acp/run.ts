@@ -183,14 +183,18 @@ async function promptPermission(
   });
   const trimmed = answer.trim().toLowerCase();
   if (trimmed === '') {
-    return { outcome: 'selected', optionId: req.options[0]!.optionId };
+    const optionId = req.options[0]?.optionId;
+    return optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' };
   }
   if (trimmed === 'c' || trimmed === 'cancel') {
     return { outcome: 'cancelled' };
   }
   const idx = Number.parseInt(trimmed, 10);
   if (Number.isInteger(idx) && idx >= 1 && idx <= req.options.length) {
-    return { outcome: 'selected', optionId: req.options[idx - 1]!.optionId };
+    const optionId = req.options[idx - 1]?.optionId;
+    if (optionId) {
+      return { outcome: 'selected', optionId };
+    }
   }
   return { outcome: 'cancelled' };
 }

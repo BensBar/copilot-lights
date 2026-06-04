@@ -83,7 +83,7 @@ describe('ACP session → aggregator integration', () => {
   });
 
   it('surfaces permission requests and answers via the responder', async () => {
-  const clock = 1000;
+    const clock = 1000;
     const aggregator = new StateAggregator({ now: () => clock });
     const events: WireEvent[] = [];
     const emit = (e: WireEvent): void => {
