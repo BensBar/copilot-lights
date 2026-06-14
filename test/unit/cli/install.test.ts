@@ -24,7 +24,7 @@ describe('cmdInstall', () => {
     }
   });
 
-  it('wires all 13 event keys with the right command string', async () => {
+  it('wires all 14 event keys with the right command string', async () => {
     const logs: string[] = [];
     const result = await cmdInstall({
       hooksFile,
@@ -32,9 +32,10 @@ describe('cmdInstall', () => {
       logger: (s) => logs.push(s),
     });
 
-    expect(result.wiredEvents).toHaveLength(13);
+    expect(result.wiredEvents).toHaveLength(14);
     expect(result.wiredEvents).toContain('sessionStart');
     expect(result.wiredEvents).toContain('userPromptSubmitted');
+    expect(result.wiredEvents).toContain('preMcpToolCall');
     expect(result.wiredEvents).toContain('agentStop');
     expect(result.wiredEvents).toContain('notification');
 
@@ -51,6 +52,13 @@ describe('cmdInstall', () => {
     expect(hooks.userPromptSubmitted[0]).toEqual({
       type: 'command',
       command: `${process.execPath} ${binaryPath} hook UserPromptSubmit`,
+      timeoutSec: 1,
+    });
+
+    expect(hooks.preMcpToolCall).toBeDefined();
+    expect(hooks.preMcpToolCall[0]).toEqual({
+      type: 'command',
+      command: `${process.execPath} ${binaryPath} hook PreMcpToolCall`,
       timeoutSec: 1,
     });
   });
@@ -176,7 +184,7 @@ describe('cmdInstall', () => {
     });
 
     expect(existsSync(nestedHooksFile)).toBe(true);
-    expect(result.wiredEvents).toHaveLength(13);
+    expect(result.wiredEvents).toHaveLength(14);
   });
 
   it('wires statusLine into settings.json when --statusline', async () => {

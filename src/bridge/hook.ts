@@ -5,6 +5,7 @@ const KNOWN_EVENTS = new Set([
   'SessionEnd',
   'UserPromptSubmit',
   'PreToolUse',
+  'PreMcpToolCall',
   'PostToolUse',
   'PostToolUseFailure',
   'ErrorOccurred',

@@ -35,12 +35,38 @@ describe('cmdDoctor', () => {
     }
   });
 
+  it('reports the ACP source as informational and never fails doctor on it', async () => {
+    const available = await cmdDoctor({
+      hooksFile,
+      socketPath,
+      autostartPath: join(testDir, 'no-such-unit'),
+      platform: 'systemd',
+      acpProbe: () => ({ available: true, detail: '`copilot` supports --acp' }),
+    });
+    const a = Object.fromEntries(available.checks.map((c) => [c.name, c]));
+    expect(a.acp?.ok).toBe(true);
+    expect(a.acp?.detail).toMatch(/acp-run/);
+
+    const missing = await cmdDoctor({
+      hooksFile,
+      socketPath,
+      autostartPath: join(testDir, 'no-such-unit'),
+      platform: 'systemd',
+      acpProbe: () => ({ available: false, detail: '`copilot` not found on PATH' }),
+    });
+    const m = Object.fromEntries(missing.checks.map((c) => [c.name, c]));
+    // Even when unavailable, the acp check stays ok (it is optional).
+    expect(m.acp?.ok).toBe(true);
+    expect(m.acp?.detail).toMatch(/default source/);
+  });
+
   it('reports failures for missing hooks and unreachable daemon', async () => {
     const result = await cmdDoctor({
       hooksFile,
       socketPath,
       autostartPath: join(testDir, 'no-such-unit'),
       platform: 'systemd',
+      acpProbe: () => ({ available: false, detail: 'stub' }),
     });
 
     expect(result.ok).toBe(false);
@@ -86,6 +112,7 @@ describe('cmdDoctor', () => {
       socketPath,
       autostartPath: join(testDir, 'no-such-unit'),
       platform: 'systemd',
+      acpProbe: () => ({ available: false, detail: 'stub' }),
     });
 
     const byName = Object.fromEntries(result.checks.map((c) => [c.name, c]));
@@ -106,6 +133,7 @@ describe('cmdDoctor', () => {
       socketPath,
       autostartPath: unitPath,
       platform: 'systemd',
+      acpProbe: () => ({ available: false, detail: 'stub' }),
     });
 
     const byName = Object.fromEntries(result.checks.map((c) => [c.name, c]));

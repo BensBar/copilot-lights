@@ -7,7 +7,7 @@ import { dirname } from 'node:path';
 export type HookEvent =
   | 'SessionStart' | 'SessionEnd'
   | 'UserPromptSubmit'
-  | 'PreToolUse' | 'PostToolUse' | 'PostToolUseFailure'
+  | 'PreToolUse' | 'PreMcpToolCall' | 'PostToolUse' | 'PostToolUseFailure'
   | 'ErrorOccurred'
   | 'Stop'
   | 'SubagentStart' | 'SubagentStop'
@@ -446,6 +446,20 @@ export class StateAggregator {
         if (session.lastDoneTs !== undefined && ts - session.lastDoneTs < this.thinkingIdleTtlMs) {
           session.pendingTurns = Math.max(session.pendingTurns, 1);
         }
+        session.lastWorkEventTs = ts;
+        session.lastToolEventTs = ts;
+        break;
+
+      case 'PreMcpToolCall':
+        // An MCP tool call is starting (Copilot CLI 1.0.51+). Unlike
+        // PreToolUse there is no matching post-event to decrement, so we
+        // treat it as a lightweight `thinking` work-pulse: prime pendingTurns
+        // (so rule 3 keeps the light on `thinking`) and refresh the work
+        // timestamps without touching the activeTools counter. The
+        // thinking-idle decay clears it if nothing else follows.
+        session.pendingTurns = Math.max(session.pendingTurns, 1);
+        session.awaitingPermission = false;
+        session.hasAttentionNotification = false;
         session.lastWorkEventTs = ts;
         session.lastToolEventTs = ts;
         break;

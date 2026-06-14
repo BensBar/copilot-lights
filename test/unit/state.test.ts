@@ -757,6 +757,34 @@ describe('StateAggregator', () => {
     });
   });
 
+  describe('PreMcpToolCall', () => {
+    it('PreMcpToolCall drives thinking and resolves on Stop', () => {
+      const now = 1000;
+      const agg = new StateAggregator({ now: () => now });
+
+      agg.apply({ event: 'SessionStart', sessionId: 's1', ts: now });
+      expect(agg.resolve()).toBe('ready');
+
+      agg.apply({ event: 'PreMcpToolCall', sessionId: 's1', ts: now });
+      expect(agg.resolve()).toBe('thinking');
+
+      agg.apply({ event: 'Stop', sessionId: 's1', ts: now });
+      expect(agg.resolve()).toBe('done');
+    });
+
+    it('PreMcpToolCall does not leak an activeTools counter', () => {
+      const now = 1000;
+      const agg = new StateAggregator({ now: () => now });
+
+      agg.apply({ event: 'SessionStart', sessionId: 's1', ts: now });
+      agg.apply({ event: 'PreMcpToolCall', sessionId: 's1', ts: now });
+
+      const snapshot = agg.snapshot();
+      expect(snapshot.sessions[0].activeTools).toBe(0);
+      expect(snapshot.sessions[0].pendingTurns).toBe(1);
+    });
+  });
+
   describe('PreCompact', () => {
     it('PreCompact sets pendingTurns to at least 1', () => {
       const now = 1000;

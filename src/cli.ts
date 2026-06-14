@@ -10,6 +10,7 @@ import { loadConfig, defaultSocketPath, defaultSessionsPath } from './config/loa
 import { createAdapter } from './adapters/registry.js';
 import { Daemon } from './daemon/server.js';
 import { mainHook } from './bridge/hook-bin.js';
+import { runAcp, detectCopilotAcp } from './bridge/acp/run.js';
 import { pairWithBridge } from './adapters/hue.js';
 import { sendToDaemon } from './bridge/client.js';
 import { runStatusline } from './bridge/statusline.js';
@@ -46,6 +47,7 @@ const EVENT_MAP: Record<string, string> = {
   sessionEnd: 'SessionEnd',
   userPromptSubmitted: 'UserPromptSubmit',
   preToolUse: 'PreToolUse',
+  preMcpToolCall: 'PreMcpToolCall',
   postToolUse: 'PostToolUse',
   postToolUseFailure: 'PostToolUseFailure',
   errorOccurred: 'ErrorOccurred',
@@ -433,6 +435,8 @@ export interface DoctorOptions {
   /** When set, the path the autostart unit should live at. */
   autostartPath?: string;
   logger?: (s: string) => void;
+  /** Test seam: probe for `copilot --acp` support. Default: real detection. */
+  acpProbe?: () => { available: boolean; detail: string };
 }
 
 export interface DoctorCheck {
@@ -586,6 +590,16 @@ export async function cmdDoctor(opts: DoctorOptions): Promise<DoctorResult> {
       detail: 'autostart not supported on this platform — run the daemon under your own supervisor',
     });
   }
+
+  // 5. ACP source availability (informational — optional, never fails doctor).
+  const acp = (opts.acpProbe ?? detectCopilotAcp)();
+  checks.push({
+    name: 'acp',
+    ok: true,
+    detail: acp.available
+      ? `${acp.detail} — opt-in high-fidelity source via \`copilot-lights acp-run\``
+      : `${acp.detail}. Hooks remain the default source; \`acp-run\` is optional.`,
+  });
 
   return {
     ok: checks.every((c) => c.ok),
@@ -975,6 +989,31 @@ program
       // Swallow all errors, always exit 0
       process.exit(0);
     }
+  });
+
+program
+  .command('acp-run')
+  .description(
+    'Launch Copilot CLI in ACP mode and drive the lights from its authoritative event stream (opt-in; hooks remain the default)',
+  )
+  .option('--socket <path>', 'Unix socket path')
+  .option('--command <bin>', 'Copilot executable to launch', 'copilot')
+  .allowExcessArguments(true)
+  .allowUnknownOption(true)
+  .action(async (options, cmd) => {
+    const socketPath = options.socket ?? defaultSocketPath();
+    const probe = detectCopilotAcp(options.command);
+    if (!probe.available) {
+      console.error(kleur.red(`acp-run: ${probe.detail}`));
+      process.exitCode = 1;
+      return;
+    }
+    const exitCode = await runAcp({
+      socketPath,
+      command: options.command,
+      extraArgs: cmd.args ?? [],
+    });
+    process.exitCode = exitCode;
   });
 
 program
