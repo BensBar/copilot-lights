@@ -11,6 +11,7 @@ import { createAdapter } from './adapters/registry.js';
 import { Daemon } from './daemon/server.js';
 import { mainHook } from './bridge/hook-bin.js';
 import { runAcp, detectCopilotAcp } from './bridge/acp/run.js';
+import { runSdkWatch, detectSdkLogs } from './bridge/sdklog/run.js';
 import { pairWithBridge } from './adapters/hue.js';
 import { sendToDaemon } from './bridge/client.js';
 import { runStatusline } from './bridge/statusline.js';
@@ -1014,6 +1015,44 @@ program
       extraArgs: cmd.args ?? [],
     });
     process.exitCode = exitCode;
+  });
+
+program
+  .command('watch-sdk')
+  .description(
+    'Drive the lights from the Copilot SDK logs (~/.copilot/logs) — for surfaces (GitHub app / workspace agent) that do not fire hooks',
+  )
+  .option('--socket <path>', 'Unix socket path')
+  .option('--logs-dir <path>', 'Override the Copilot logs directory')
+  .option('--cwd <path>', 'Workspace dir to stamp on emitted events')
+  .option('--from-start', 'Replay the current log from its beginning', false)
+  .action(async (options) => {
+    const socketPath = options.socket ?? defaultSocketPath();
+    const probe = detectSdkLogs(options.logsDir);
+    if (!probe.available) {
+      console.error(kleur.red(`watch-sdk: ${probe.detail}`));
+      process.exitCode = 1;
+      return;
+    }
+    const follower = runSdkWatch({
+      socketPath,
+      logsDir: options.logsDir,
+      cwd: options.cwd,
+      fromStart: options.fromStart === true,
+      log: (m) => console.error(kleur.dim(m)),
+    });
+    console.log(
+      kleur.green(
+        `[copilot-lights] watching SDK logs (${probe.dir}) → ${socketPath}`,
+      ),
+    );
+    const stop = (): void => {
+      follower.stop();
+      process.exit(0);
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+    await follower.done();
   });
 
 program
