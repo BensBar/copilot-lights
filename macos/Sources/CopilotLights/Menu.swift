@@ -6,12 +6,14 @@ class MenuBuilder: NSObject, NSMenuDelegate {
     private let daemonClient: DaemonClient
     private let configStore: ConfigStore
     private let ui: UISettings
+    private let settingsWindow: SettingsWindowController
     private var currentStatus: PollResult = .offline
 
-    init(daemonClient: DaemonClient, configStore: ConfigStore, ui: UISettings) {
+    init(daemonClient: DaemonClient, configStore: ConfigStore, ui: UISettings, settingsWindow: SettingsWindowController) {
         self.daemonClient = daemonClient
         self.configStore = configStore
         self.ui = ui
+        self.settingsWindow = settingsWindow
         super.init()
 
         Task {
@@ -191,123 +193,11 @@ class MenuBuilder: NSObject, NSMenuDelegate {
     }
 
     @objc private func openSettings() {
-        // Menu-bar-only apps (.accessory) don't have a normal app window in
-        // the responder chain, so SwiftUI's Settings scene won't reliably
-        // open via `showSettingsWindow:` alone. Promote to .regular, activate,
-        // and dispatch the open action on the next runloop tick so AppKit has
-        // a chance to wire up the application's menu / responder chain. Only
-        // then do we send `showSettingsWindow:`. After the settings window
-        // closes, we return to .accessory so the app stays out of the Dock.
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-
-        // First: bring an already-open settings window forward immediately.
-        if presentExistingSettingsWindow() { return }
-
-        // Otherwise: ask AppKit to create one. Do it on the next runloop tick
-        // so the policy change has settled.
-        DispatchQueue.main.async { [weak self] in
-            self?.requestOpenSettingsWindow()
-
-            // Give SwiftUI a brief moment to instantiate the window, then
-            // surface it and arm the close-observer that drops policy back.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                if !(self?.presentExistingSettingsWindow() ?? false) {
-                    // Last-ditch: try the open action one more time.
-                    self?.requestOpenSettingsWindow()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                        _ = self?.presentExistingSettingsWindow()
-                    }
-                }
-            }
-        }
-    }
-
-    /// Find any already-open Settings/Preferences window, surface it, and
-    /// wire up an observer to drop the activation policy back to .accessory
-    /// when the user closes it. Returns true if such a window was found.
-    @discardableResult
-    private func presentExistingSettingsWindow() -> Bool {
-        guard let window = settingsWindow() else { return false }
-        window.collectionBehavior.insert(.moveToActiveSpace)
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        attachSettingsCloseObserver(window)
-        return true
-    }
-
-    private func settingsWindow() -> NSWindow? {
-        for window in NSApp.windows {
-            // SwiftUI Settings scene window identifier on macOS 13+.
-            if window.identifier?.rawValue == "com_apple_SwiftUI_Settings_window" {
-                return window
-            }
-            let title = window.title
-            if title.localizedCaseInsensitiveContains("settings")
-                || title.localizedCaseInsensitiveContains("preferences")
-            {
-                return window
-            }
-        }
-        return nil
-    }
-
-    private func requestOpenSettingsWindow() {
-        // The Settings/Preferences action is implemented by a private
-        // SwiftUI responder, not by NSApplication itself. Sending the
-        // selector directly to NSApp crashes ("unrecognized selector"); 
-        // sending with `to: nil` walks the responder chain, which is
-        // unreliable from a status-item context.
-        //
-        // The trick that works in both contexts: find the existing
-        // "Settings…" / "Preferences…" item in the app's main menu — its
-        // `target` is the right responder, set up by SwiftUI when the app
-        // promotes to .regular. Trigger the action through that item.
-        if let item = findSettingsMenuItem(), let action = item.action {
-            _ = NSApp.sendAction(action, to: item.target, from: item)
-            return
-        }
-
-        // Fallback: responder-chain delivery. Works when the app menu is
-        // already wired up (e.g., immediately after activation).
-        if #available(macOS 14, *) {
-            _ = NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        } else {
-            _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-        }
-    }
-
-    /// Locate the SwiftUI-installed Settings/Preferences menu item in the
-    /// application's main menu. Walks every top-level menu (typically the
-    /// app menu is at index 0, but be defensive).
-    private func findSettingsMenuItem() -> NSMenuItem? {
-        guard let mainMenu = NSApp.mainMenu else { return nil }
-        let settingsSelector = Selector(("showSettingsWindow:"))
-        let preferencesSelector = Selector(("showPreferencesWindow:"))
-        for top in mainMenu.items {
-            guard let submenu = top.submenu else { continue }
-            for item in submenu.items {
-                if let action = item.action,
-                   action == settingsSelector || action == preferencesSelector {
-                    return item
-                }
-            }
-        }
-        return nil
-    }
-
-    private func attachSettingsCloseObserver(_ window: NSWindow) {
-        // Avoid stacking duplicate observers if the user opens settings repeatedly.
-        NotificationCenter.default.removeObserver(self,
-                                                  name: NSWindow.willCloseNotification,
-                                                  object: window)
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: window,
-            queue: .main
-        ) { _ in
-            NSApp.setActivationPolicy(.accessory)
-        }
+        // Present our own NSWindow-hosted SettingsView. This avoids SwiftUI's
+        // `Settings` scene + `showSettingsWindow:`, which doesn't reliably
+        // open from a menu-bar-only (.accessory) app — the historical cause
+        // of "Settings doesn't load."
+        settingsWindow.show()
     }
     
     @objc private func revealConfig() {

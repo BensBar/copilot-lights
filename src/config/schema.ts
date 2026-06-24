@@ -51,6 +51,22 @@ export const GoveeConfigSchema = z.object({
   })).default([]),
   /** Multicast discovery scan duration. Set to 0 to disable. */
   discoveryTimeoutMs: z.number().int().nonnegative().default(1500),
+  /**
+   * Minimum spacing between physical UDP bursts to the device, in ms.
+   * Govee LAN devices silently drop commands that arrive faster than they
+   * can process; the scheduler emits up to 10 fps during animated states
+   * (breathe/pulse/flash), which floods the bulb and makes colour updates
+   * get lost. The adapter coalesces to at most one burst per this window,
+   * always sending the most recent frame. Optional; defaults to 120ms.
+   */
+  minSendIntervalMs: z.number().int().nonnegative().optional(),
+  /**
+   * Gap between the individual packets (turn / colorwc / brightness) within
+   * a single burst, in ms. A small gap makes the device reliably process
+   * each command instead of dropping one under back-to-back delivery.
+   * Optional; defaults to 40ms. Set 0 to send back-to-back.
+   */
+  interPacketGapMs: z.number().int().nonnegative().optional(),
 });
 
 export const ConfigSchema = z.object({
