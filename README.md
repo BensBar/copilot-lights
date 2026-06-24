@@ -206,6 +206,7 @@ copilot-lights uninstall              # remove our entries from hooks.json + set
 copilot-lights status [--json]        # query the running daemon over the socket
 copilot-lights doctor                 # check config/hooks/daemon/autostart and report what's broken
 copilot-lights acp-run [-- <args>]    # launch Copilot in ACP mode and drive lights from its event stream
+copilot-lights watch-sdk              # tail ~/.copilot/logs for SDK surfaces (GitHub app) that don't fire hooks
 copilot-lights statusline             # internal — prints one line for Copilot's footer
 copilot-lights enable-autostart       # generate launchd/systemd unit (does not load it)
 copilot-lights disable-autostart      # delete the unit file
@@ -294,7 +295,7 @@ is purely additive.
 |---|---|---|
 | **Copilot CLI** (terminal) | ✅ Full | `~/.copilot/hooks.json` integration; all events. |
 | **Copilot CLI via ACP** | ✅ Full (opt-in) | `copilot-lights acp-run` launches `copilot --acp --stdio` and drives lights from the authoritative JSON-RPC event stream. |
-| **GitHub macOS app** (`GitHub.app`) | ⚠️ Manual | The bundled SDK in `~/Library/Caches/copilot-sdk-*/copilot` does **not** honor `~/.copilot/hooks.json`. The app does write structured logs to `~/.copilot/logs/process-*.log` — a future log-tail bridge could parse them and POST to `/event`. Tracked as future work. |
+| **GitHub macOS app** (`GitHub.app`) / SDK surfaces | ✅ Full (opt-in) | The bundled SDK in `~/Library/Caches/copilot-sdk-*/copilot` does **not** honor `~/.copilot/hooks.json`, but it writes structured logs to `~/.copilot/logs/process-*.log`. `copilot-lights watch-sdk` tails those logs and drives the lights from their single-line event markers (privacy-safe: only event name + session UUID are read). |
 | **VS Code Copilot Chat** | ⚠️ Manual | The Copilot Chat extension exposes no public state-change API to other extensions. A custom integration would have to register itself as a chat participant and POST state to `/event` for its own interactions only. |
 | **github.com / Copilot mobile** | ⚠️ Webhook-bridge | Server-side only. Requires a public endpoint (Cloudflare Tunnel / ngrok) and a GitHub App receiving webhook events, then POSTing to `/event`. Not shipped here. |
 
@@ -425,7 +426,8 @@ src/
 │   ├── client.ts     # 200 ms-budget socket client
 │   ├── hook.ts       # event-name + stdin → minimal daemon message
 │   ├── hook-bin.ts   # CLI hook entrypoint
-│   └── acp/          # opt-in ACP source: JSON-RPC framer, ACP→event translator, session driver, `acp-run` launcher
+│   ├── acp/          # opt-in ACP source: JSON-RPC framer, ACP→event translator, session driver, `acp-run` launcher
+│   └── sdklog/       # opt-in SDK log-tail source: marker parser/translator, file follower, `watch-sdk` runner
 ├── autostart/        # launchd plist / systemd unit generators (no shelling out)
 ├── util/color.ts     # hex/HSV/CIE-xy + lerp + brightness scaling
 └── cli.ts            # commander program; thin wrappers around testable cmd* functions
