@@ -195,6 +195,44 @@ copilot-lights pair-hue 192.168.1.42
 Tokens may be inline strings, `env:VARNAME`, or `keychain:NAME` (macOS
 Keychain, service `copilot-lights`).
 
+### Govee (LAN)
+
+Govee bulbs/lamps are driven directly over the LAN (UDP/JSON) — no cloud, no
+token:
+
+```json
+{
+  "adapter": "govee",
+  "govee": {
+    "devices": [{ "ip": "192.168.4.114", "name": "Govee floor light" }],
+    "discoveryTimeoutMs": 0
+  }
+}
+```
+
+Two device-side requirements:
+
+1. **Enable "LAN Control"** for each device in the Govee Home app
+   (device → settings → *LAN Control*). Without it the device ignores all
+   packets.
+2. **Put the light in a solid Color mode — not a Scene/DIY effect.** The
+   Govee LAN API only exposes power, brightness, and a single solid colour;
+   it has **no command to exit a Scene**. While a device is rendering a
+   Scene (or an animated DIY effect), colour writes are accepted and stored
+   but visually overridden — the light keeps showing the scene (often
+   appearing stuck on white) even though copilot-lights is sending the
+   right colour. Switch the device to a plain colour once and it will track
+   state colours from then on.
+
+The daemon emits up to 10 frames/sec during animated states. Govee LAN
+devices drop commands that arrive too fast, so the adapter coalesces to at
+most one UDP burst per `minSendIntervalMs` (default 120) and only re-sends
+the packets that changed, spacing them by `interPacketGapMs` (default 40).
+Tune both under `"govee"` if your device needs gentler pacing.
+
+Run `copilot-lights govee discover` to list LAN-control-enabled devices and
+their IPs.
+
 ## CLI
 
 ```

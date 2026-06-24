@@ -7,6 +7,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController!
     private var menuBuilder: MenuBuilder!
     private var floatingController: FloatingWindowController!
+    private var settingsWindowController: SettingsWindowController!
     private var overlayHotKey: GlobalHotKey?
     let daemonClient = DaemonClient()
     let configStore = ConfigStore()
@@ -15,8 +16,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
+        settingsWindowController = SettingsWindowController(configStore: configStore, uiSettings: uiSettings)
         statusItemController = StatusItemController(daemonClient: daemonClient, configStore: configStore)
-        menuBuilder = MenuBuilder(daemonClient: daemonClient, configStore: configStore, ui: uiSettings)
+        menuBuilder = MenuBuilder(daemonClient: daemonClient, configStore: configStore, ui: uiSettings, settingsWindow: settingsWindowController)
         floatingController = FloatingWindowController(daemonClient: daemonClient, ui: uiSettings, configStore: configStore)
 
         statusItemController.setup()

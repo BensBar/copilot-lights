@@ -140,7 +140,7 @@ describe('Govee adapter', () => {
     it('applyFrame sends turn → color → brightness to each device', async () => {
       adapter = new GoveeAdapter(
         { devices: [{ ip: '10.0.0.5' }, { ip: '10.0.0.6' }], discoveryTimeoutMs: 0 },
-        { socketFactory: () => socket as any }
+        { socketFactory: () => socket as any, minSendIntervalMs: 0, interPacketGapMs: 0 }
       );
       await adapter.connect();
       const frame: LightFrame = { rgb: { r: 255, g: 0, b: 128 }, brightness: 60 };
@@ -166,7 +166,7 @@ describe('Govee adapter', () => {
     it('applyFrame with brightness 0 only sends turn-off (no color/brightness)', async () => {
       adapter = new GoveeAdapter(
         { devices: [{ ip: '10.0.0.5' }], discoveryTimeoutMs: 0 },
-        { socketFactory: () => socket as any }
+        { socketFactory: () => socket as any, minSendIntervalMs: 0, interPacketGapMs: 0 }
       );
       await adapter.connect();
       await adapter.applyFrame({ rgb: { r: 0, g: 255, b: 0 }, brightness: 0 });
@@ -176,45 +176,91 @@ describe('Govee adapter', () => {
       expect(obj.msg.data.value).toBe(0);
     });
 
-    it('applyFrame coalesces concurrent calls (only the latest frame survives)', async () => {
+    it('only re-sends the packets that changed between frames', async () => {
       adapter = new GoveeAdapter(
         { devices: [{ ip: '10.0.0.5' }], discoveryTimeoutMs: 0 },
-        { socketFactory: () => socket as any }
+        { socketFactory: () => socket as any, minSendIntervalMs: 0, interPacketGapMs: 0 }
+      );
+      await adapter.connect();
+      const cmds = () => socket.sent.map((p) => JSON.parse(p.msg.toString()).msg.cmd);
+
+      // First frame: full burst (turn + colorwc + brightness).
+      await adapter.applyFrame({ rgb: { r: 255, g: 0, b: 0 }, brightness: 50 });
+      expect(cmds()).toEqual(['turn', 'colorwc', 'brightness']);
+
+      // Identical frame: nothing changes → no packets.
+      socket.sent.length = 0;
+      await adapter.applyFrame({ rgb: { r: 255, g: 0, b: 0 }, brightness: 50 });
+      expect(cmds()).toEqual([]);
+
+      // Brightness-only change (the breathe case): just a brightness packet,
+      // no re-sent turn (which makes some bulbs flicker) and no colour.
+      socket.sent.length = 0;
+      await adapter.applyFrame({ rgb: { r: 255, g: 0, b: 0 }, brightness: 80 });
+      expect(cmds()).toEqual(['brightness']);
+
+      // Colour-only change: just a colorwc packet.
+      socket.sent.length = 0;
+      await adapter.applyFrame({ rgb: { r: 0, g: 255, b: 0 }, brightness: 80 });
+      expect(cmds()).toEqual(['colorwc']);
+
+      // Turn off: single turn-off packet.
+      socket.sent.length = 0;
+      await adapter.applyFrame({ rgb: { r: 0, g: 255, b: 0 }, brightness: 0 });
+      expect(cmds()).toEqual(['turn']);
+
+      // Turn back on: full burst again (colour re-asserted on power-on).
+      socket.sent.length = 0;
+      await adapter.applyFrame({ rgb: { r: 0, g: 255, b: 0 }, brightness: 80 });
+      expect(cmds()).toEqual(['turn', 'colorwc', 'brightness']);
+    });
+
+    it('throttles a burst of frames to one send + a trailing flush of the latest', async () => {
+      adapter = new GoveeAdapter(
+        { devices: [{ ip: '10.0.0.5' }], discoveryTimeoutMs: 0 },
+        { socketFactory: () => socket as any, minSendIntervalMs: 50, interPacketGapMs: 0 }
       );
       await adapter.connect();
 
-      // Make sends slow so the second applyFrame queues behind the first.
-      const realSend = socket.send.bind(socket);
-      let inFlightDelay = 20;
-      socket.send = ((msg: Buffer, port: number, ip: string, cb?: (e: Error | null) => void) => {
-        socket.sent.push({ msg: Buffer.from(msg), port, ip });
-        setTimeout(() => cb && cb(null), inFlightDelay);
-      }) as any;
-      // Reset baseline now that we replaced send.
-      socket.sent.length = 0;
+      const colorsSent = () =>
+        socket.sent
+          .map((p) => JSON.parse(p.msg.toString()))
+          .filter((o) => o.msg.cmd === 'colorwc')
+          .map((o) => o.msg.data.color);
 
-      const p1 = adapter.applyFrame({ rgb: { r: 255, g: 0, b: 0 }, brightness: 50 });
-      // Queue a few while p1 is in flight; only the last should be sent.
-      void adapter.applyFrame({ rgb: { r: 0, g: 255, b: 0 }, brightness: 50 });
-      void adapter.applyFrame({ rgb: { r: 0, g: 0, b: 255 }, brightness: 80 });
-      const pLast = adapter.applyFrame({ rgb: { r: 100, g: 100, b: 100 }, brightness: 25 });
-      inFlightDelay = 0;
-      await p1;
-      await pLast;
+      // First frame sends immediately.
+      await adapter.applyFrame({ rgb: { r: 255, g: 0, b: 0 }, brightness: 50 });
+      // Two more within the throttle window — these coalesce; only the last
+      // (blue) should survive to the trailing flush. Green is dropped.
+      await adapter.applyFrame({ rgb: { r: 0, g: 255, b: 0 }, brightness: 50 });
+      await adapter.applyFrame({ rgb: { r: 0, g: 0, b: 255 }, brightness: 50 });
 
-      // First batch (red): turn + color + brightness = 3 packets
-      // Coalesced final batch (gray, brightness 25): another 3 packets
-      // The middle two frames should NOT have produced packets.
-      expect(socket.sent.length).toBe(6);
-      const colors = socket.sent
-        .filter((p) => JSON.parse(p.msg.toString()).msg.cmd === 'colorwc')
-        .map((p) => JSON.parse(p.msg.toString()).msg.data.color);
-      expect(colors).toEqual([
+      // Before the window elapses, only red has been sent.
+      expect(colorsSent()).toEqual([{ r: 255, g: 0, b: 0 }]);
+
+      // After the window, the trailing flush sends the latest (blue) only.
+      await new Promise((r) => setTimeout(r, 80));
+      expect(colorsSent()).toEqual([
         { r: 255, g: 0, b: 0 },
-        { r: 100, g: 100, b: 100 },
+        { r: 0, g: 0, b: 255 },
       ]);
-      // Restore for cleanup
-      socket.send = realSend;
+    });
+
+    it('spaces packets within a burst by interPacketGapMs', async () => {
+      const gaps: number[] = [];
+      adapter = new GoveeAdapter(
+        { devices: [{ ip: '10.0.0.5' }], discoveryTimeoutMs: 0 },
+        {
+          socketFactory: () => socket as any,
+          minSendIntervalMs: 0,
+          interPacketGapMs: 40,
+          delay: async (ms: number) => { gaps.push(ms); },
+        }
+      );
+      await adapter.connect();
+      // Full burst = 3 packets → 2 inter-packet gaps.
+      await adapter.applyFrame({ rgb: { r: 1, g: 2, b: 3 }, brightness: 50 });
+      expect(gaps).toEqual([40, 40]);
     });
 
     it('discover() collects responses received during the timeout window', async () => {
@@ -235,7 +281,7 @@ describe('Govee adapter', () => {
     it('snapshot/restore round-trips the most recent frame', async () => {
       adapter = new GoveeAdapter(
         { devices: [{ ip: '10.0.0.5' }], discoveryTimeoutMs: 0 },
-        { socketFactory: () => socket as any }
+        { socketFactory: () => socket as any, minSendIntervalMs: 0, interPacketGapMs: 0 }
       );
       await adapter.connect();
       const f: LightFrame = { rgb: { r: 10, g: 20, b: 30 }, brightness: 40 };
