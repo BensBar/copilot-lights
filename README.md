@@ -230,6 +230,13 @@ most one UDP burst per `minSendIntervalMs` (default 120) and only re-sends
 the packets that changed, spacing them by `interPacketGapMs` (default 40).
 Tune both under `"govee"` if your device needs gentler pacing.
 
+**Colour tip for RGB LED lamps:** the default GitHub-palette state colours
+are desaturated (e.g. `ready` `#7ee787`, `error` `#f85149`) and can render
+ambiguously on a Govee LED — pale green reads as turquoise, coral red reads
+as pink. If your status colours look off, set more saturated values per
+state under `"states"` (e.g. `"ready": {"color":"#00ff00",...}` and
+`"error": {"color":"#ff0000",...}`).
+
 Run `copilot-lights govee discover` to list LAN-control-enabled devices and
 their IPs.
 
