@@ -7,6 +7,7 @@ import {
   buildBrightnessPacket,
   buildColorPacket,
   parseDiscoveryResponse,
+  blinkGoveeDevice,
 } from '../../../src/adapters/govee.js';
 import type { LightFrame } from '../../../src/adapters/adapter.js';
 
@@ -88,17 +89,17 @@ describe('Govee adapter', () => {
   });
 
   describe('parseDiscoveryResponse', () => {
-    it('extracts ip/sku/name from a well-formed reply', () => {
+    it('extracts ip/sku/mac from a well-formed reply', () => {
       const buf = Buffer.from(JSON.stringify({
         msg: {
           cmd: 'scan',
-          data: { ip: '192.168.1.50', sku: 'H6008', device: 'Bedroom Bulb' },
+          data: { ip: '192.168.1.50', sku: 'H6008', device: 'AA:BB:CC:DD:EE:FF' },
         },
       }));
       expect(parseDiscoveryResponse(buf)).toEqual({
         ip: '192.168.1.50',
         sku: 'H6008',
-        name: 'Bedroom Bulb',
+        mac: 'AA:BB:CC:DD:EE:FF',
       });
     });
 
@@ -271,11 +272,11 @@ describe('Govee adapter', () => {
       await adapter.connect();
       // Fire a fake response shortly after discover() starts.
       const response = Buffer.from(JSON.stringify({
-        msg: { cmd: 'scan', data: { ip: '10.0.0.99', sku: 'H6008', device: 'Lamp' } },
+        msg: { cmd: 'scan', data: { ip: '10.0.0.99', sku: 'H6008', device: 'AA:BB:CC:00:11:22' } },
       }));
       setTimeout(() => socket.emit('message', response, { address: '10.0.0.99', port: 4002 } as any), 20);
       const found = await adapter.discover(80);
-      expect(found).toEqual([{ ip: '10.0.0.99', sku: 'H6008', name: 'Lamp' }]);
+      expect(found).toEqual([{ ip: '10.0.0.99', sku: 'H6008', mac: 'AA:BB:CC:00:11:22' }]);
     });
 
     it('snapshot/restore round-trips the most recent frame', async () => {
@@ -304,6 +305,29 @@ describe('Govee adapter', () => {
       await adapter.connect();
       await adapter.close();
       await expect(adapter.applyFrame({ rgb: { r: 1, g: 2, b: 3 }, brightness: 50 })).rejects.toThrow();
+    });
+  });
+
+  describe('blinkGoveeDevice', () => {
+    it('flashes the target IP and ends bright, then closes the socket', async () => {
+      const socket = new FakeSocket();
+      await blinkGoveeDevice('10.0.0.9', {
+        cycles: 2,
+        socketFactory: () => socket as any,
+        delay: async () => {},
+      });
+      // All packets went to the one target on the control port 4003.
+      expect(socket.sent.length).toBeGreaterThan(0);
+      expect(socket.sent.every((p) => p.ip === '10.0.0.9' && p.port === 4003)).toBe(true);
+      // Two cycles => two "turn off" packets.
+      const offs = socket.sent.filter(
+        (p) => JSON.parse(p.msg.toString()).msg.cmd === 'turn' && JSON.parse(p.msg.toString()).msg.data.value === 0
+      );
+      expect(offs.length).toBe(2);
+      // Final packet leaves it on (turn=1) so it's easy to find.
+      const last3 = socket.sent.slice(-3).map((p) => JSON.parse(p.msg.toString()).msg);
+      expect(last3.some((m) => m.cmd === 'turn' && m.data.value === 1)).toBe(true);
+      expect(socket.closed).toBe(true);
     });
   });
 });

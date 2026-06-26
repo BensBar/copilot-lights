@@ -16,14 +16,18 @@ Built using the battle-tested macos-spm-app-packaging skill by Dimillian (https:
 ```bash
 cd macos
 ./Scripts/package_app.sh release
-cp -R "Copilot Lights.app" /Applications/
 open "/Applications/Copilot Lights.app"
 ```
+
+`package_app.sh release` builds, signs, and **installs the app straight to
+`/Applications`**, then removes the in-repo build artifact — so there is always
+exactly one app binary on the machine. To keep the bundle in the repo instead
+(e.g. for CI), set `NO_INSTALL=1`; to install elsewhere, set `INSTALL_DIR=/path`.
 
 Launch at Login: System Settings > General > Login Items, add `Copilot Lights.app`.
 
 > Easier: from the repo root run the one-liner installer documented in the
-> top-level README — it builds the app, copies it to `/Applications`, and
+> top-level README — it builds the app, installs it to `/Applications`, and
 > registers it for Launch at Login automatically.
 
 ## Development

@@ -363,3 +363,96 @@ export class HomeAssistantAdapter implements LightAdapter {
     this._closed = true;
   }
 }
+
+// ---------- Discovery + identify (setup helpers) ----------
+
+/** Minimal connection params for setup-time Home Assistant operations (before
+ *  any `entities` are chosen). */
+export interface HomeAssistantConnection {
+  baseUrl: string;
+  token: string;
+}
+
+/** A `light.*` entity as surfaced to the setup UI. */
+export interface HomeAssistantDiscoveredLight {
+  /** Entity id, e.g. "light.desk_strip" (persisted in config.homeAssistant.entities). */
+  entityId: string;
+  /** Friendly name from the entity's attributes, falling back to the id. */
+  name: string;
+}
+
+function normalizeBaseUrl(baseUrl: string): string {
+  return baseUrl.replace(/\/$/, '');
+}
+
+/**
+ * List every `light.*` entity Home Assistant exposes so the user can pick which
+ * ones Copilot Lights should drive. Requires only the base URL + token.
+ */
+export async function discoverHomeAssistantLights(
+  conn: HomeAssistantConnection | undefined,
+  opts?: { dispatcher?: unknown }
+): Promise<HomeAssistantDiscoveredLight[]> {
+  if (!conn?.baseUrl || !conn?.token) {
+    throw new Error('Home Assistant is not configured — set the base URL and a long-lived token first.');
+  }
+  const base = normalizeBaseUrl(conn.baseUrl);
+  const { statusCode, body } = await request(`${base}/api/states`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${conn.token}` },
+    dispatcher: opts?.dispatcher as Dispatcher | undefined,
+    headersTimeout: 5000,
+    bodyTimeout: 5000,
+  });
+  if (statusCode === 401) {
+    throw new Error('Home Assistant rejected the token (401). Create a new long-lived access token.');
+  }
+  if (statusCode !== 200) {
+    throw new Error(`Home Assistant returned status ${statusCode} listing entities.`);
+  }
+  const states = (await body.json()) as Array<{
+    entity_id?: unknown;
+    attributes?: { friendly_name?: unknown };
+  }>;
+  const lights: HomeAssistantDiscoveredLight[] = [];
+  for (const s of Array.isArray(states) ? states : []) {
+    if (typeof s.entity_id !== 'string' || !s.entity_id.startsWith('light.')) continue;
+    const friendly = s.attributes?.friendly_name;
+    lights.push({
+      entityId: s.entity_id,
+      name: typeof friendly === 'string' && friendly.length > 0 ? friendly : s.entity_id,
+    });
+  }
+  return lights;
+}
+
+/**
+ * Make a single Home Assistant light visibly blink so the user can locate it,
+ * using the `light.turn_on` service with `flash: "long"`. HA restores the
+ * prior state automatically after the flash.
+ */
+export async function blinkHomeAssistantEntity(
+  conn: HomeAssistantConnection | undefined,
+  entityId: string,
+  opts?: { dispatcher?: unknown }
+): Promise<void> {
+  if (!conn?.baseUrl || !conn?.token) {
+    throw new Error('Home Assistant is not configured — set the base URL and token first.');
+  }
+  const base = normalizeBaseUrl(conn.baseUrl);
+  const { statusCode, body } = await request(`${base}/api/services/light/turn_on`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${conn.token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ entity_id: entityId, flash: 'long' }),
+    dispatcher: opts?.dispatcher as Dispatcher | undefined,
+    headersTimeout: 5000,
+    bodyTimeout: 5000,
+  });
+  await body.text();
+  if (statusCode < 200 || statusCode >= 300) {
+    throw new Error(`Home Assistant identify failed for ${entityId}: status ${statusCode}`);
+  }
+}

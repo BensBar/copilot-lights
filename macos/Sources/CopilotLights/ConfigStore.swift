@@ -120,6 +120,37 @@ final class ConfigStore: ObservableObject {
         doc.adapter = a
     }
 
+    /// Replace the full set of enabled backends (multi-adapter). Normalizes by
+    /// dropping mock when any real backend is present, keeps `adapter` pointed
+    /// at the first enabled backend for back-compat with older daemons.
+    func setAdapters(_ kinds: [AdapterKind]) {
+        var seen = Set<AdapterKind>()
+        let unique = kinds.filter { seen.insert($0).inserted }
+        let real = unique.filter { $0 != .mock }
+        let normalized = real.isEmpty ? [AdapterKind.mock] : real
+        doc.adapters = normalized
+        doc.adapter = normalized.first ?? .mock
+    }
+
+    /// Enable one backend without disturbing the others (additive). Used by the
+    /// per-adapter setup panes so saving Govee doesn't clobber Hue/HA.
+    func enableAdapter(_ a: AdapterKind) {
+        var current = doc.enabledAdapters
+        if !current.contains(a) { current.append(a) }
+        setAdapters(current)
+    }
+
+    /// Disable one backend, leaving the rest enabled.
+    func disableAdapter(_ a: AdapterKind) {
+        let remaining = doc.enabledAdapters.filter { $0 != a }
+        setAdapters(remaining)
+    }
+
+    /// Toggle a backend on/off.
+    func setAdapterEnabled(_ a: AdapterKind, _ enabled: Bool) {
+        if enabled { enableAdapter(a) } else { disableAdapter(a) }
+    }
+
     func setHomeAssistant(baseUrl: String, tokenPlain: String?, entities: [String]) {
         // If user provided a fresh plaintext token, stash it in Keychain and
         // store `keychain:HASS_TOKEN` in the config file.
@@ -137,6 +168,101 @@ final class ConfigStore: ObservableObject {
 
     func setStateStyle(_ name: String, _ style: StateStyle) {
         doc.states[name] = style
+    }
+
+    /// Replace the configured Govee device list, preserving any other Govee
+    /// fields (timing tunables) the user may have set on disk.
+    func setGoveeDevices(_ devices: [GoveeDeviceConfig]) {
+        var g = doc.govee ?? GoveeConfig(devices: [], discoveryTimeoutMs: nil, minSendIntervalMs: nil, interPacketGapMs: nil)
+        g.devices = devices
+        doc.govee = g
+    }
+
+    /// Overwrite the given state styles (used by "Apply recommended scenes").
+    func applyStateStyles(_ styles: [String: StateStyle]) {
+        for (name, style) in styles {
+            doc.states[name] = style
+        }
+    }
+
+    /// Ask the daemon to run an on-demand Govee LAN discovery scan and return
+    /// the enriched result. Returns nil if the daemon is offline or the reply
+    /// can't be parsed. Uses a generous socket timeout because a scan listens
+    /// for replies for a couple of seconds.
+    func scanGovee(scanMs: Int = 3000) async -> GoveeScanReply? {
+        let line = "{\"kind\":\"query\",\"query\":\"goveeScan\",\"timeoutMs\":\(max(0, scanMs))}\n"
+        let socketTimeout = UInt64(max(0, scanMs)) + 2500
+        guard let reply = await sendOneShot(line: line, socketPath: SocketPath.resolve(), timeoutMs: socketTimeout),
+              let data = reply.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(GoveeScanReply.self, from: data)
+    }
+
+    /// Ask the daemon to list the paired Hue bridge's lights. Returns nil when
+    /// the daemon is offline / unparseable; a populated `error` field means the
+    /// daemon answered but discovery failed (e.g. bridge not configured).
+    func scanHue() async -> HueScanReply? {
+        let line = "{\"kind\":\"query\",\"query\":\"hueScan\"}\n"
+        guard let reply = await sendOneShot(line: line, socketPath: SocketPath.resolve(), timeoutMs: 10000),
+              let data = reply.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(HueScanReply.self, from: data)
+    }
+
+    /// Ask the daemon to list Home Assistant `light.*` entities.
+    func scanHA() async -> HAScanReply? {
+        let line = "{\"kind\":\"query\",\"query\":\"haScan\"}\n"
+        guard let reply = await sendOneShot(line: line, socketPath: SocketPath.resolve(), timeoutMs: 10000),
+              let data = reply.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(HAScanReply.self, from: data)
+    }
+
+    /// Ask the daemon to make a single light blink so the user can locate it.
+    /// Supply exactly the identifier the chosen adapter needs: `ip` for Govee,
+    /// `lightId` for Hue, `entityId` for Home Assistant. Returns nil when the
+    /// daemon is offline; otherwise the parsed result (check `.ok` / `.error`).
+    func identify(adapter: AdapterKind, ip: String? = nil, mac: String? = nil,
+                  lightId: String? = nil, entityId: String? = nil) async -> IdentifyReply? {
+        var fields: [String] = ["\"kind\":\"identify\"", "\"adapter\":\"\(adapter.rawValue)\""]
+        func add(_ key: String, _ value: String?) {
+            guard let v = value, !v.isEmpty else { return }
+            let safe = v.replacingOccurrences(of: "\\", with: "\\\\")
+                        .replacingOccurrences(of: "\"", with: "\\\"")
+            fields.append("\"\(key)\":\"\(safe)\"")
+        }
+        add("ip", ip)
+        add("mac", mac)
+        add("lightId", lightId)
+        add("entityId", entityId)
+        let line = "{" + fields.joined(separator: ",") + "}\n"
+        guard let reply = await sendOneShot(line: line, socketPath: SocketPath.resolve(), timeoutMs: 9000),
+              let data = reply.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(IdentifyReply.self, from: data)
+    }
+
+    /// Replace the configured Hue bridge connection + chosen light ids,
+    /// preserving the bridge IP/application key the pairing flow stored.
+    func setHueLights(_ lightIds: [String]) {
+        guard var hue = doc.hue else { return }
+        hue.lightIds = lightIds
+        doc.hue = hue
+    }
+
+    /// Persist a freshly-paired Hue bridge (IP + application key). Light ids are
+    /// left empty until the user picks some via the scan flow.
+    func setHueBridge(bridgeIp: String, applicationKey: String) {
+        let existing = doc.hue
+        doc.hue = HueConfig(
+            bridgeIp: bridgeIp,
+            applicationKey: applicationKey,
+            lightIds: existing?.lightIds ?? []
+        )
     }
 
     /// Resolves a stored token reference (`keychain:NAME`, `env:NAME`, or

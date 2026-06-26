@@ -206,3 +206,29 @@ codesign "${CODESIGN_ARGS[@]}" \
   "$APP"
 
 echo "Created $APP"
+
+# Install to /Applications by default so there is exactly one app binary on the
+# machine and it lives where launchd / Spotlight expect it. Each build would
+# otherwise leave a duplicate .app inside the repo; we remove that build
+# artifact after copying. Set NO_INSTALL=1 to keep the bundle in the repo
+# instead (e.g. for CI that only needs to verify packaging).
+if [[ "${NO_INSTALL:-0}" != "1" ]]; then
+  DEST_DIR=${INSTALL_DIR:-/Applications}
+  DEST="$DEST_DIR/${BUNDLE_NAME}.app"
+  if [[ ! -d "$DEST_DIR" || ! -w "$DEST_DIR" ]]; then
+    echo "WARNING: $DEST_DIR is not writable; leaving bundle at $APP" >&2
+  else
+    echo "Installing to $DEST"
+    # ditto over the destination handles the case where the app is currently
+    # running (the live process keeps its open inode; the next launch picks up
+    # the new bundle). Remove first so stale files don't linger.
+    rm -rf "$DEST" 2>/dev/null || true
+    ditto "$APP" "$DEST"
+    rm -rf "$APP"
+    echo "Installed $DEST (removed build artifact $APP)"
+    echo "Relaunch with: open -a \"$DEST\""
+    APP="$DEST"
+  fi
+fi
+
+echo "Done: $APP"

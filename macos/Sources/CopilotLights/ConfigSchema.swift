@@ -5,8 +5,13 @@ import Foundation
 /// JSONDecoder by default; we only declare what the UI edits.
 struct CopilotLightsConfigDoc: Codable, Equatable {
     var adapter: AdapterKind
+    /// Optional multi-backend selection. When present and non-empty the daemon
+    /// drives ALL listed adapters at once (composite) and this wins over
+    /// `adapter`. `adapter` is kept for back-compat / single-backend fallback.
+    var adapters: [AdapterKind]?
     var homeAssistant: HomeAssistantConfig?
     var hue: HueConfig?
+    var govee: GoveeConfig?
     /// Keyed by state name: ready / thinking / awaiting_input / error / done.
     /// We keep this as an ordered, well-known dictionary in the model layer.
     var states: [String: StateStyle]
@@ -22,8 +27,10 @@ struct CopilotLightsConfigDoc: Codable, Equatable {
     static func empty() -> CopilotLightsConfigDoc {
         CopilotLightsConfigDoc(
             adapter: .mock,
+            adapters: nil,
             homeAssistant: nil,
             hue: nil,
+            govee: nil,
             states: [:],
             transitionMs: 600,
             restoreOnExit: true,
@@ -32,6 +39,17 @@ struct CopilotLightsConfigDoc: Codable, Equatable {
             socketPath: nil,
             http: nil
         )
+    }
+
+    /// The set of backends currently enabled, derived from `adapters` (multi)
+    /// falling back to the single `adapter`. Mock is dropped when any real
+    /// backend is enabled, mirroring the daemon's `activeAdapterKinds`.
+    var enabledAdapters: [AdapterKind] {
+        let raw = (adapters?.isEmpty == false) ? adapters! : [adapter]
+        var seen = Set<AdapterKind>()
+        let unique = raw.filter { seen.insert($0).inserted }
+        let real = unique.filter { $0 != .mock }
+        return real.isEmpty ? [.mock] : real
     }
 }
 
@@ -65,6 +83,62 @@ struct HueConfig: Codable, Equatable {
     var bridgeIp: String
     var applicationKey: String
     var lightIds: [String]
+}
+
+/// Mirrors `GoveeConfigSchema` in src/config/schema.ts. We model every field
+/// (not just `devices`) so that saving from the Settings UI never drops a
+/// user's hand-tuned timing values.
+struct GoveeConfig: Codable, Equatable {
+    var devices: [GoveeDeviceConfig]
+    var discoveryTimeoutMs: Int?
+    var minSendIntervalMs: Int?
+    var interPacketGapMs: Int?
+}
+
+struct GoveeDeviceConfig: Codable, Equatable, Identifiable {
+    var ip: String
+    var sku: String?
+    var name: String?
+    /// Device MAC / stable ID from discovery; survives DHCP lease changes.
+    var mac: String?
+    /// Manual device-type override (one of `GoveeDeviceCatalog.types`). When
+    /// set, it wins over the daemon's SKU-derived guess on the next scan and
+    /// drives which recommended scene set applies. Optional — omitted devices
+    /// fall back to auto-detection.
+    var type: String?
+
+    /// Stable identity for SwiftUI lists. Prefer the MAC (does not move),
+    /// then fall back to the current IP.
+    var id: String { mac ?? ip }
+}
+
+/// UI-side mirror of the Govee device-type catalog in
+/// `src/adapters/govee-models.ts`. Used for the per-device manual type
+/// override picker. Kept in sync by hand (the list is short and stable).
+enum GoveeDeviceCatalog {
+    /// Ordered list of selectable types (matches `GOVEE_DEVICE_TYPES`).
+    static let types: [String] = [
+        "bulb", "light-strip", "floor-lamp", "table-lamp", "wall-panel",
+        "tv-backlight", "downlight", "ceiling", "outdoor", "string-lights", "unknown",
+    ]
+
+    /// Human-readable label for a type (matches `typeLabel` in TS).
+    static func label(_ type: String) -> String {
+        switch type {
+        case "bulb": return "Smart Bulb"
+        case "light-strip": return "Light Strip"
+        case "floor-lamp": return "Floor Lamp"
+        case "table-lamp": return "Table Lamp"
+        case "wall-panel": return "Wall Panel"
+        case "tv-backlight": return "TV Backlight"
+        case "downlight": return "Downlight"
+        case "ceiling": return "Ceiling Light"
+        case "outdoor": return "Outdoor Light"
+        case "string-lights": return "String Lights"
+        case "unknown": return "Unknown"
+        default: return type.capitalized
+        }
+    }
 }
 
 struct StateStyle: Codable, Equatable {

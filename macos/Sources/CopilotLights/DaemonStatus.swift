@@ -34,11 +34,16 @@ struct SessionDetail: Codable, Identifiable, Hashable {
     /// auto-approved). Surfaced in the menubar so the user can see at a
     /// glance which streams are autonomous.
     let autopilot: Bool?
+    /// Bundle id of the GUI app that owns this session (terminal emulator or
+    /// the Copilot desktop app), captured by the hook. Lets the menubar focus
+    /// the owning app on click. Optional for back-compat with older daemons.
+    let origin: String?
 
     private enum CodingKeys: String, CodingKey {
         case id, cwd, lastEventTs, state, lastToolName
         case activeTools, activeSubagents, pendingTurns
         case awaitingPermission, hasAttentionNotification, lastDoneTs, autopilot
+        case origin
     }
 
     init(from decoder: Decoder) throws {
@@ -55,6 +60,7 @@ struct SessionDetail: Codable, Identifiable, Hashable {
         hasAttentionNotification = try c.decodeIfPresent(Bool.self, forKey: .hasAttentionNotification)
         lastDoneTs = try c.decodeIfPresent(Int.self, forKey: .lastDoneTs)
         autopilot = try c.decodeIfPresent(Bool.self, forKey: .autopilot)
+        origin = try c.decodeIfPresent(String.self, forKey: .origin)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -71,6 +77,7 @@ struct SessionDetail: Codable, Identifiable, Hashable {
         try c.encodeIfPresent(hasAttentionNotification, forKey: .hasAttentionNotification)
         try c.encodeIfPresent(lastDoneTs, forKey: .lastDoneTs)
         try c.encodeIfPresent(autopilot, forKey: .autopilot)
+        try c.encodeIfPresent(origin, forKey: .origin)
     }
 }
 

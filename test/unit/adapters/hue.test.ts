@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { MockAgent, setGlobalDispatcher } from 'undici';
-import { HueAdapter, pairWithBridge } from '../../../src/adapters/hue.js';
+import { HueAdapter, pairWithBridge, discoverHueLights, blinkHueLight } from '../../../src/adapters/hue.js';
 import type { HueSnapshot } from '../../../src/adapters/hue.js';
 import type { LightFrame } from '../../../src/adapters/adapter.js';
 import { rgbToXy } from '../../../src/util/color.js';
@@ -493,5 +493,73 @@ describe('registry integration', () => {
     expect(adapter).toBeInstanceOf(HueAdapter);
 
     await adapter.close();
+  });
+});
+
+describe('discoverHueLights', () => {
+  let agent: MockAgent;
+  beforeEach(() => {
+    agent = new MockAgent();
+    agent.disableNetConnect();
+    setGlobalDispatcher(agent);
+  });
+
+  it('lists lights with id, name and archetype', async () => {
+    agent
+      .get('https://192.168.1.42')
+      .intercept({ path: '/clip/v2/resource/light', method: 'GET' })
+      .reply(200, {
+        data: [
+          { id: 'uuid-a', metadata: { name: 'Desk', archetype: 'table_shade' } },
+          { id: 'uuid-b', metadata: { name: 'Ceiling' } },
+          { notALight: true },
+        ],
+      });
+    const lights = await discoverHueLights(
+      { bridgeIp: '192.168.1.42', applicationKey: 'k' },
+      { dispatcher: agent }
+    );
+    expect(lights).toEqual([
+      { id: 'uuid-a', name: 'Desk', archetype: 'table_shade' },
+      { id: 'uuid-b', name: 'Ceiling', archetype: undefined },
+    ]);
+  });
+
+  it('throws a clear error when not configured', async () => {
+    await expect(discoverHueLights(undefined)).rejects.toThrow(/not configured/i);
+  });
+
+  it('throws on a 403 from the bridge', async () => {
+    agent
+      .get('https://192.168.1.42')
+      .intercept({ path: '/clip/v2/resource/light', method: 'GET' })
+      .reply(403, {});
+    await expect(
+      discoverHueLights({ bridgeIp: '192.168.1.42', applicationKey: 'bad' }, { dispatcher: agent })
+    ).rejects.toThrow(/403|re-pair/i);
+  });
+});
+
+describe('blinkHueLight', () => {
+  let agent: MockAgent;
+  beforeEach(() => {
+    agent = new MockAgent();
+    agent.disableNetConnect();
+    setGlobalDispatcher(agent);
+  });
+
+  it('PUTs the native identify action to the light', async () => {
+    let sawBody: any;
+    agent
+      .get('https://192.168.1.42')
+      .intercept({ path: '/clip/v2/resource/light/uuid-a', method: 'PUT' })
+      .reply(200, (opts) => {
+        sawBody = JSON.parse(opts.body as string);
+        return { data: [] };
+      });
+    await blinkHueLight({ bridgeIp: '192.168.1.42', applicationKey: 'k' }, 'uuid-a', {
+      dispatcher: agent,
+    });
+    expect(sawBody).toEqual({ identify: { action: 'identify' } });
   });
 });
