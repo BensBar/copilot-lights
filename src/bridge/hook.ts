@@ -25,6 +25,58 @@ interface HookInput {
 }
 
 /**
+ * Map a `TERM_PROGRAM` / `LC_TERMINAL` value to the macOS bundle identifier of
+ * the terminal emulator that set it. Used only as a fallback when
+ * `__CFBundleIdentifier` is absent (e.g. a session that was re-parented away
+ * from its launching GUI app).
+ */
+const TERM_PROGRAM_BUNDLE_IDS: Record<string, string> = {
+  'iterm.app': 'com.googlecode.iterm2',
+  iterm2: 'com.googlecode.iterm2',
+  apple_terminal: 'com.apple.Terminal',
+  ghostty: 'com.mitchellh.ghostty',
+  vscode: 'com.microsoft.VSCode',
+  wezterm: 'com.github.wez.wezterm',
+  hyper: 'co.zeit.hyper',
+  tabby: 'org.tabby',
+  kitty: 'net.kovidgoyal.kitty',
+  alacritty: 'org.alacritty',
+  warpterminal: 'dev.warp.Warp-Stable',
+  warp: 'dev.warp.Warp-Stable',
+};
+
+/**
+ * Resolve the bundle identifier of the GUI application that owns this hook's
+ * Copilot session — the terminal emulator (iTerm2, Ghostty, Terminal, …) or
+ * the Copilot desktop app. The hook process inherits the Copilot CLI's
+ * environment, which in turn inherited the launching app's, so this is
+ * captured for free with no process-tree walking.
+ *
+ * Only an app *identifier* is captured — never prompt text, tool args, file
+ * contents, or any session payload — so it stays within the wire privacy
+ * contract (the same class of data as `cwd`).
+ */
+export function resolveOrigin(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  // 1. macOS sets __CFBundleIdentifier on processes launched (directly or
+  //    transitively) by a GUI app via LaunchServices. This is the exact,
+  //    focusable owner: com.github.githubapp (Copilot desktop app),
+  //    com.googlecode.iterm2, com.mitchellh.ghostty, com.apple.Terminal, etc.
+  const cf = env.__CFBundleIdentifier;
+  if (cf && cf.trim()) return cf.trim();
+
+  // 2. Fallback: derive the terminal from TERM_PROGRAM / LC_TERMINAL, which
+  //    most emulators export even into re-parented (detached) sessions.
+  const candidates = [env.TERM_PROGRAM, env.LC_TERMINAL];
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const mapped = TERM_PROGRAM_BUNDLE_IDS[raw.trim().toLowerCase()];
+    if (mapped) return mapped;
+  }
+
+  return undefined;
+}
+
+/**
  * Parse a timestamp (ISO 8601) into milliseconds since epoch.
  * Fallback to now() if missing or invalid.
  */
@@ -88,6 +140,8 @@ export async function runHook(args: HookInput): Promise<void> {
       : cwd ? `_cwd:${cwd}`
       : '_unknown';
 
+  const origin = resolveOrigin();
+
   const message = {
     kind: 'event' as const,
     event,
@@ -96,6 +150,7 @@ export async function runHook(args: HookInput): Promise<void> {
     ...(toolName && { toolName }),
     ...(notificationType && { notificationType }),
     ...(cwd && { cwd }),
+    ...(origin && { origin }),
   };
 
   // Send to daemon, always swallow errors

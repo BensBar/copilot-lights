@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { MockAgent } from 'undici';
-import { HomeAssistantAdapter, type HomeAssistantSnapshot } from '../../../src/adapters/home-assistant.js';
+import { HomeAssistantAdapter, discoverHomeAssistantLights, blinkHomeAssistantEntity, type HomeAssistantSnapshot } from '../../../src/adapters/home-assistant.js';
 import type { LightFrame } from '../../../src/adapters/adapter.js';
 
 describe('HomeAssistantAdapter', () => {
@@ -811,5 +811,87 @@ describe('HomeAssistantAdapter', () => {
 
       await expect(adapter.connect()).resolves.toBeUndefined();
     });
+  });
+});
+
+describe('discoverHomeAssistantLights', () => {
+  let agent: MockAgent;
+  const baseUrl = 'http://homeassistant.local:8123';
+  const token = 'test-token-123';
+
+  beforeEach(() => {
+    agent = new MockAgent();
+    agent.disableNetConnect();
+  });
+
+  it('returns only light.* entities with friendly names', async () => {
+    agent
+      .get(baseUrl)
+      .intercept({ path: '/api/states', method: 'GET' })
+      .reply(200, [
+        { entity_id: 'light.desk', attributes: { friendly_name: 'Desk Lamp' } },
+        { entity_id: 'light.no_name', attributes: {} },
+        { entity_id: 'switch.fan', attributes: { friendly_name: 'Fan' } },
+        { notAnEntity: true },
+      ]);
+    const lights = await discoverHomeAssistantLights({ baseUrl, token }, { dispatcher: agent });
+    expect(lights).toEqual([
+      { entityId: 'light.desk', name: 'Desk Lamp' },
+      { entityId: 'light.no_name', name: 'light.no_name' },
+    ]);
+  });
+
+  it('strips a trailing slash from the base URL', async () => {
+    agent
+      .get(baseUrl)
+      .intercept({ path: '/api/states', method: 'GET' })
+      .reply(200, []);
+    const lights = await discoverHomeAssistantLights(
+      { baseUrl: `${baseUrl}/`, token },
+      { dispatcher: agent }
+    );
+    expect(lights).toEqual([]);
+  });
+
+  it('throws a clear error when not configured', async () => {
+    await expect(discoverHomeAssistantLights(undefined)).rejects.toThrow(/not configured/i);
+  });
+
+  it('throws on a 401', async () => {
+    agent
+      .get(baseUrl)
+      .intercept({ path: '/api/states', method: 'GET' })
+      .reply(401, {});
+    await expect(
+      discoverHomeAssistantLights({ baseUrl, token: 'bad' }, { dispatcher: agent })
+    ).rejects.toThrow(/401|token/i);
+  });
+});
+
+describe('blinkHomeAssistantEntity', () => {
+  let agent: MockAgent;
+  const baseUrl = 'http://homeassistant.local:8123';
+  const token = 'test-token-123';
+
+  beforeEach(() => {
+    agent = new MockAgent();
+    agent.disableNetConnect();
+  });
+
+  it('POSTs light.turn_on with flash long', async () => {
+    let sawBody: any;
+    agent
+      .get(baseUrl)
+      .intercept({ path: '/api/services/light/turn_on', method: 'POST' })
+      .reply(200, (opts) => {
+        sawBody = JSON.parse(opts.body as string);
+        return [];
+      });
+    await blinkHomeAssistantEntity({ baseUrl, token }, 'light.desk', { dispatcher: agent });
+    expect(sawBody).toEqual({ entity_id: 'light.desk', flash: 'long' });
+  });
+
+  it('throws when not configured', async () => {
+    await expect(blinkHomeAssistantEntity(undefined, 'light.desk')).rejects.toThrow(/not configured/i);
   });
 });

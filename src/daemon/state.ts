@@ -28,6 +28,9 @@ export interface HookMessage {
    *  active session is running. Only the path is captured; never file
    *  contents, prompts, or tool args. */
   cwd?: string;
+  /** Bundle id of the GUI app that owns this session (terminal emulator or
+   *  the Copilot desktop app). App identifier only — never session content. */
+  origin?: string;
 }
 
 /**
@@ -142,6 +145,10 @@ interface SessionState {
    * auto-approval window. */
   awaitingPermissionTs?: number;
   cwd?: string;
+  /** Bundle id of the GUI app that owns this session (terminal emulator or
+   *  the Copilot desktop app). Lets the menubar focus the owning window on
+   *  click. App identifier only — never session content. */
+  origin?: string;
   /** Most recent tool name observed on this session (PreToolUse).
    * Surfaced in the per-session menubar dropdown so the user can see
    * what each session is currently working on. Never cleared — the UI
@@ -366,6 +373,7 @@ export class StateAggregator {
           hasAttentionNotification: false,
           lastEventTs: ts,
           cwd: msg.cwd,
+          origin: msg.origin,
           consecutiveAutoApprovals: 0,
           autopilotDetected: false,
         };
@@ -383,6 +391,7 @@ export class StateAggregator {
           hasAttentionNotification: false,
           lastEventTs: ts,
           cwd: msg.cwd,
+          origin: msg.origin,
           consecutiveAutoApprovals: 0,
           autopilotDetected: false,
         };
@@ -393,6 +402,7 @@ export class StateAggregator {
     // Refresh lastEventTs for all events; remember the most recent cwd
     session.lastEventTs = ts;
     if (msg.cwd) session.cwd = msg.cwd;
+    if (msg.origin) session.origin = msg.origin;
 
     switch (msg.event) {
       case 'UserPromptSubmit':
@@ -817,6 +827,7 @@ export class StateAggregator {
       lastDoneTs?: number;
       lastEventTs: number;
       cwd?: string;
+      origin?: string;
       lastToolName?: string;
       autopilot: boolean;
       state: LightState;
@@ -851,6 +862,7 @@ export class StateAggregator {
         lastDoneTs: s.lastDoneTs,
         lastEventTs: s.lastEventTs,
         cwd: s.cwd,
+        origin: s.origin,
         lastToolName: s.lastToolName,
         autopilot: s.autopilotDetected,
         state: this.resolveSessionState(s, now),

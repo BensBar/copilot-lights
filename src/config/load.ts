@@ -55,6 +55,25 @@ export function defaultSessionsPath(): string {
   return resolve(homedir(), '.copilot-lights', 'sessions.json');
 }
 
+/**
+ * Resolve the path that config writes should target, mirroring the read
+ * precedence in `loadConfig`: an explicit override, then
+ * `COPILOT_LIGHTS_CONFIG`, then `$XDG_CONFIG_HOME/copilot-lights/config.json`,
+ * then `~/.copilot-lights/config.json`. Unlike `loadConfig` this does not check
+ * for file existence — it returns where a new config *should* be written.
+ */
+export function defaultConfigPath(override?: string): string {
+  if (override) return resolve(override);
+  if (process.env.COPILOT_LIGHTS_CONFIG) {
+    return resolve(process.env.COPILOT_LIGHTS_CONFIG);
+  }
+  const xdgConfig = process.env.XDG_CONFIG_HOME;
+  if (xdgConfig) {
+    return resolve(xdgConfig, 'copilot-lights', 'config.json');
+  }
+  return resolve(homedir(), '.copilot-lights', 'config.json');
+}
+
 function resolveEnvRefs(obj: unknown): unknown {
   if (typeof obj === 'string') {
     if (obj.startsWith('env:')) {

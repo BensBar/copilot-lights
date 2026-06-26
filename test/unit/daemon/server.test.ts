@@ -40,6 +40,7 @@ describe('Daemon', () => {
       restoreOnExit: true,
       errorTtlMs: 4000,
       doneTtlMs: 1500,
+      govee: { devices: [], discoveryTimeoutMs: 1500 },
     };
   });
 
@@ -239,6 +240,105 @@ describe('Daemon', () => {
         // Got a response - should be empty since connection was destroyed
         expect(result).toBe('');
       }
+    });
+  });
+
+  describe('goveeScan query', () => {
+    it('returns a govee-scan envelope with devices + scene maps', async () => {
+      daemon = new Daemon({ config, adapter, socketPath });
+      await daemon.start();
+
+      // Short timeout keeps the test fast; we assert on the response *shape*
+      // rather than concrete devices (none are expected on the test network,
+      // and any that answer must not make the test flaky).
+      const raw = await sendNoEnd(
+        socketPath,
+        JSON.stringify({ kind: 'query', query: 'goveeScan', timeoutMs: 50 })
+      );
+      const reply = JSON.parse(raw.trim());
+      expect(reply.kind).toBe('govee-scan');
+      expect(Array.isArray(reply.devices)).toBe(true);
+      expect(typeof reply.scenesByType).toBe('object');
+      expect(typeof reply.rationaleByType).toBe('object');
+      // Any device returned must be enriched with model + type fields.
+      for (const d of reply.devices) {
+        expect(typeof d.ip).toBe('string');
+        expect(typeof d.model).toBe('string');
+        expect(typeof d.type).toBe('string');
+        expect(reply.scenesByType[d.type]).toBeDefined();
+      }
+    });
+
+    it('still replies when the scan window exceeds the 1s socket idle timeout', async () => {
+      daemon = new Daemon({ config, adapter, socketPath });
+      await daemon.start();
+
+      // Regression: the connection has a 1s idle timeout. A scan window longer
+      // than that must extend the timeout so the reply isn't dropped (which the
+      // macOS app surfaced as a spurious "Daemon offline").
+      const raw = await sendNoEnd(
+        socketPath,
+        JSON.stringify({ kind: 'query', query: 'goveeScan', timeoutMs: 1200 })
+      );
+      const reply = JSON.parse(raw.trim());
+      expect(reply.kind).toBe('govee-scan');
+      expect(Array.isArray(reply.devices)).toBe(true);
+    });
+  });
+
+  describe('hueScan / haScan queries', () => {
+    it('returns a hue-scan error envelope when Hue is unconfigured', async () => {
+      daemon = new Daemon({ config, adapter, socketPath });
+      await daemon.start();
+      const raw = await sendNoEnd(
+        socketPath,
+        JSON.stringify({ kind: 'query', query: 'hueScan' })
+      );
+      const reply = JSON.parse(raw.trim());
+      expect(reply.kind).toBe('hue-scan');
+      expect(reply.lights).toEqual([]);
+      expect(reply.error).toMatch(/not configured/i);
+    });
+
+    it('returns an ha-scan error envelope when Home Assistant is unconfigured', async () => {
+      daemon = new Daemon({ config, adapter, socketPath });
+      await daemon.start();
+      const raw = await sendNoEnd(
+        socketPath,
+        JSON.stringify({ kind: 'query', query: 'haScan' })
+      );
+      const reply = JSON.parse(raw.trim());
+      expect(reply.kind).toBe('ha-scan');
+      expect(reply.lights).toEqual([]);
+      expect(reply.error).toMatch(/not configured/i);
+    });
+  });
+
+  describe('identify', () => {
+    it('fails clearly when a govee identify omits the IP', async () => {
+      daemon = new Daemon({ config, adapter, socketPath });
+      await daemon.start();
+      const raw = await sendNoEnd(
+        socketPath,
+        JSON.stringify({ kind: 'identify', adapter: 'govee' })
+      );
+      const reply = JSON.parse(raw.trim());
+      expect(reply.kind).toBe('identify-result');
+      expect(reply.ok).toBe(false);
+      expect(reply.error).toMatch(/IP/i);
+    });
+
+    it('fails clearly when a hue identify targets an unconfigured bridge', async () => {
+      daemon = new Daemon({ config, adapter, socketPath });
+      await daemon.start();
+      const raw = await sendNoEnd(
+        socketPath,
+        JSON.stringify({ kind: 'identify', adapter: 'hue', lightId: 'uuid-a' })
+      );
+      const reply = JSON.parse(raw.trim());
+      expect(reply.kind).toBe('identify-result');
+      expect(reply.ok).toBe(false);
+      expect(reply.error).toMatch(/not configured/i);
     });
   });
 

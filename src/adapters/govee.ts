@@ -35,6 +35,10 @@ export interface GoveeDevice {
   ip: string;
   sku?: string;
   name?: string;
+  /** Device MAC / stable ID as reported in the discovery reply's `device`
+   *  field. Survives DHCP lease changes, so it's the reliable handle for
+   *  re-resolving a device whose IP has moved. */
+  mac?: string;
 }
 
 export interface GoveeSnapshot extends LightSnapshot {
@@ -103,11 +107,67 @@ export function parseDiscoveryResponse(buf: Buffer): GoveeDevice | null {
   const data = m.data as { ip?: unknown; sku?: unknown; device?: unknown } | undefined;
   if (!data || typeof data !== 'object') return null;
   if (typeof data.ip !== 'string' || data.ip.length === 0) return null;
+  // Govee reports the device's MAC / stable ID in `device` — NOT a friendly
+  // name. We surface it as `mac`; `name` stays a user-supplied label only.
   return {
     ip: data.ip,
     sku: typeof data.sku === 'string' ? data.sku : undefined,
-    name: typeof data.device === 'string' ? data.device : undefined,
+    mac: typeof data.device === 'string' && data.device.length > 0 ? data.device : undefined,
   };
+}
+
+// ---------- Identify / blink (find-my-light) ----------
+
+/** Options for {@link blinkGoveeDevice}. All optional with sensible defaults. */
+export interface BlinkOptions {
+  /** Number of on/off blink cycles. Default 3. */
+  cycles?: number;
+  /** Milliseconds the light stays bright, then dark, per half-cycle. Default 350. */
+  halfPeriodMs?: number;
+  /** Test seam: substitute a UDP socket. */
+  socketFactory?: () => dgram.Socket;
+  /** Test seam: substitute the delay implementation. */
+  delay?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Visibly blink a single Govee LAN device so the user can physically locate it
+ * ("which light is this?"). Opens its own short-lived UDP socket, flashes the
+ * device bright white a few times, and leaves it switched on at full white so
+ * it's easy to spot. Self-contained and independent of the live adapter — safe
+ * to call while another adapter is driving the lights. Never throws on send
+ * errors; resolves once the sequence completes.
+ *
+ * Note: the LAN API can't reliably read prior state, so this does not restore
+ * the device's exact previous colour. When the Govee adapter is the active
+ * driver, the next scheduler frame re-asserts the correct status colour.
+ */
+export async function blinkGoveeDevice(ip: string, opts: BlinkOptions = {}): Promise<void> {
+  const cycles = Math.max(1, Math.min(10, opts.cycles ?? 3));
+  const halfPeriodMs = Math.max(50, opts.halfPeriodMs ?? 350);
+  const delay = opts.delay ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const socket = (opts.socketFactory ?? (() => dgram.createSocket('udp4')))();
+
+  const send = (packet: Buffer): Promise<void> =>
+    new Promise<void>((resolve) => {
+      // Resolve regardless of error — a blink is best-effort.
+      socket.send(packet, 4003, ip, () => resolve());
+    });
+
+  const onBright: Buffer[] = [buildTurnPacket(true), buildColorPacket(255, 255, 255), buildBrightnessPacket(100)];
+
+  try {
+    for (let i = 0; i < cycles; i++) {
+      for (const p of onBright) await send(p);
+      await delay(halfPeriodMs);
+      await send(buildTurnPacket(false));
+      await delay(halfPeriodMs);
+    }
+    // Leave it on + bright white so it's easy to find.
+    for (const p of onBright) await send(p);
+  } finally {
+    await new Promise<void>((resolve) => socket.close(() => resolve()));
+  }
 }
 
 // ---------- Adapter ----------
@@ -191,6 +251,7 @@ export class GoveeAdapter implements LightAdapter {
       ip: d.ip,
       sku: d.sku,
       name: d.name,
+      mac: d.mac,
     }));
 
     // Open the socket (used both for discovery responses and for

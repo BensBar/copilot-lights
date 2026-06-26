@@ -1302,6 +1302,27 @@ describe('StateAggregator', () => {
       expect(snap.state).toBe('thinking');
     });
 
+    it('captures and surfaces the owning-app origin in the snapshot', () => {
+      const now = 1000;
+      const agg = new StateAggregator({ now: () => now });
+
+      agg.apply({
+        event: 'SessionStart',
+        sessionId: 's-origin',
+        ts: now,
+        cwd: '/repo',
+        origin: 'com.mitchellh.ghostty',
+      });
+
+      let snap = agg.snapshot();
+      expect(snap.sessions.find((s) => s.id === 's-origin')?.origin).toBe('com.mitchellh.ghostty');
+
+      // A later event without origin must not clobber a known origin.
+      agg.apply({ event: 'PreToolUse', sessionId: 's-origin', ts: now, cwd: '/repo', toolName: 'grep' });
+      snap = agg.snapshot();
+      expect(snap.sessions.find((s) => s.id === 's-origin')?.origin).toBe('com.mitchellh.ghostty');
+    });
+
     it('finishing all subagents lets the parent decay normally', () => {
       let now = 1000;
       const agg = new StateAggregator({ now: () => now, doneTtlMs: 1500 });

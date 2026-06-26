@@ -198,7 +198,66 @@ Keychain, service `copilot-lights`).
 ### Govee (LAN)
 
 Govee bulbs/lamps are driven directly over the LAN (UDP/JSON) — no cloud, no
-token:
+token. You can set them up from the **macOS menu-bar app** or the CLI.
+
+**From the app (no terminal):** open Settings → **Govee**, click **Scan for
+devices**, tick the lights you want, and **Save & use Govee**. The app detects
+each light's model + type, switches the active adapter to Govee, and (unless you
+untick it) applies device-type-aware recommended scenes. You can also add a
+light by IP manually. Discovery runs inside the always-on daemon, so the app
+never needs network permissions of its own.
+
+**From the CLI** — the fastest way is to let discovery write the config for you:
+
+```bash
+# Scan, identify each model, then save devices + recommended scenes and
+# switch the active adapter to Govee in one step:
+copilot-lights govee discover --save
+```
+
+`discover` identifies the **model** of each device from its reported SKU and
+prints the device type:
+
+```
+Found 2 Govee device(s):
+
+  192.168.4.114   H6072  Lyra RGBICWW Corner Floor Lamp [Floor Lamp]
+  192.168.4.121   H6159  RGB Light Strip [Light Strip]
+```
+
+`--save` then:
+
+- writes every discovered device (IP + SKU + name) into `config.json`,
+- sets `"adapter": "govee"`, and
+- writes **device-type-aware recommended scenes** for each mode
+  (`ready`/`thinking`/`awaiting_input`/`error`/`done`) — e.g. floor lamps get
+  brighter scenes, TV backlights get dim, smooth ambient ones. Modes you have
+  already customised under `"states"` are left untouched. Pass `--no-scenes`
+  to skip this.
+
+A running daemon is reloaded automatically after a save.
+
+Add a single device without a full scan — by IP, or by **MAC** (the stable id
+from the discovery reply, which survives DHCP changes; we scan once to resolve
+its current IP):
+
+```bash
+copilot-lights govee add 192.168.4.114 --sku H6072 --name "Floor lamp"
+copilot-lights govee add --mac AA:BB:CC:DD:EE:FF --name "Strip"
+```
+
+`add` merges the device into `config.json` (preserving any existing entries),
+switches to the Govee adapter, writes recommended scenes for absent modes, and
+reloads the daemon — same as `discover --save`, just for one device.
+
+Preview the recommended scenes without saving anything:
+
+```bash
+copilot-lights govee recommend --type floor-lamp   # for a specific type
+copilot-lights govee recommend                      # auto-detect from discovery
+```
+
+Or configure manually:
 
 ```json
 {
@@ -237,9 +296,6 @@ as pink. If your status colours look off, set more saturated values per
 state under `"states"` (e.g. `"ready": {"color":"#00ff00",...}` and
 `"error": {"color":"#ff0000",...}`).
 
-Run `copilot-lights govee discover` to list LAN-control-enabled devices and
-their IPs.
-
 ## CLI
 
 ```
@@ -256,6 +312,13 @@ copilot-lights statusline             # internal — prints one line for Copilot
 copilot-lights enable-autostart       # generate launchd/systemd unit (does not load it)
 copilot-lights disable-autostart      # delete the unit file
 copilot-lights pair-hue <bridgeIp>    # button-press pairing to obtain an applicationKey
+copilot-lights govee discover [--save] [--no-scenes]
+                                      # scan + identify Govee models; --save writes
+                                      # devices + recommended scenes and reloads the daemon
+copilot-lights govee add [ip] [--mac <mac>] [--sku <sku>] [--name <name>]
+                                      # add one device by IP or MAC (resolved via scan)
+copilot-lights govee recommend [--type <type>]
+                                      # preview per-mode scenes for a device type
 copilot-lights hook <Event>           # internal — invoked by Copilot CLI hooks
 ```
 
@@ -370,11 +433,15 @@ app](#just-the-macos-menu-bar-app) above.
 
 From the menu-bar icon → **Settings…** you can:
 
-- **Adapter** — pick Home Assistant / Hue / Mock.
+- **Adapter** — pick Home Assistant / Hue / Govee / Mock.
 - **Home Assistant** — base URL, long-lived token (stored in macOS
   Keychain under service `copilot-lights`, account `HASS_TOKEN`), Test
   Connection, and a searchable multi-select list of your `light.*`
   entities pulled live from `/api/states`.
+- **Govee** — **Scan for devices** (LAN discovery via the daemon, which
+  detects each light's model + type), tick the lights to use, optionally
+  add one by IP, and **Save & use Govee** — which switches the active
+  adapter to Govee and applies device-type-aware recommended scenes.
 - **State Styles** — color, brightness, and effect (`steady` / `breathe`
   / `pulse` / `flash`) for each of `ready`, `thinking`,
   `awaiting_input`, `error`, `done`. A live SwiftUI orb mirrors each
@@ -483,7 +550,8 @@ macos/
 │   └── StatusItemController.swift
 └── Scripts/
     ├── package_app.sh          # builds "Copilot Lights.app"
-    └── generate_app_icon.swift # regenerates Icon.iconset/*.png
+    ├── generate_app_icon_from_logo.py # crops assets/logo.png hero → Icon.iconset/*.png + Icon.icns
+    └── generate_app_icon.swift # legacy programmatic Copilot-mark icon generator
 ```
 
 Wire format on the socket (newline-delimited JSON, one message per

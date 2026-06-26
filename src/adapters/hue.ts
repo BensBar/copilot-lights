@@ -336,3 +336,103 @@ export async function pairWithBridge(
 
   throw new Error('Unexpected response from bridge during pairing');
 }
+
+// ---------- Discovery + identify (setup helpers) ----------
+
+/** Minimal connection params for setup-time Hue operations (before any
+ *  `lightIds` are chosen, so it deliberately does not require a full config). */
+export interface HueConnection {
+  bridgeIp: string;
+  applicationKey: string;
+}
+
+/** A light resource as surfaced to the setup UI. */
+export interface HueDiscoveredLight {
+  /** CLIP v2 light resource id (the value persisted in config.hue.lightIds). */
+  id: string;
+  /** Friendly name from the bridge (room/device label). */
+  name: string;
+  /** Optional archetype hint (e.g. "table_shade", "hue_go"), useful for icons. */
+  archetype?: string;
+}
+
+function hueDispatcher(opts?: { dispatcher?: Dispatcher }): Dispatcher {
+  // Hue bridges use self-signed certificates on the LAN.
+  return opts?.dispatcher ?? new Agent({ connect: { rejectUnauthorized: false } });
+}
+
+/**
+ * List every light the Hue bridge exposes so the user can pick which ones
+ * Copilot Lights should drive. Requires only the bridge IP + application key.
+ * Never returns partial junk — throws with a clear message on auth/HTTP errors.
+ */
+export async function discoverHueLights(
+  conn: HueConnection | undefined,
+  opts?: { dispatcher?: Dispatcher }
+): Promise<HueDiscoveredLight[]> {
+  if (!conn?.bridgeIp || !conn?.applicationKey) {
+    throw new Error('Hue is not configured — set the bridge IP and pair to get an application key first.');
+  }
+  const dispatcher = hueDispatcher(opts);
+  const response = await request(`https://${conn.bridgeIp}/clip/v2/resource/light`, {
+    method: 'GET',
+    headers: { 'hue-application-key': conn.applicationKey },
+    dispatcher,
+    headersTimeout: 5000,
+    bodyTimeout: 5000,
+  });
+  if (response.statusCode === 403) {
+    throw new Error('Hue bridge rejected the application key (403). Re-pair the bridge.');
+  }
+  if (response.statusCode !== 200) {
+    throw new Error(`Hue bridge returned status ${response.statusCode} listing lights.`);
+  }
+  const data = (await response.body.json()) as { data?: unknown };
+  const list = Array.isArray(data.data) ? data.data : [];
+  const lights: HueDiscoveredLight[] = [];
+  for (const item of list) {
+    const l = item as {
+      id?: unknown;
+      metadata?: { name?: unknown; archetype?: unknown };
+    };
+    if (typeof l.id !== 'string') continue;
+    lights.push({
+      id: l.id,
+      name: typeof l.metadata?.name === 'string' ? l.metadata.name : 'Hue light',
+      archetype: typeof l.metadata?.archetype === 'string' ? l.metadata.archetype : undefined,
+    });
+  }
+  return lights;
+}
+
+/**
+ * Make a single Hue light visibly blink so the user can locate it. Uses the
+ * bridge's native `identify` action (a gentle breathe) which automatically
+ * returns the light to its prior state — no manual restore needed.
+ */
+export async function blinkHueLight(
+  conn: HueConnection | undefined,
+  lightId: string,
+  opts?: { dispatcher?: Dispatcher }
+): Promise<void> {
+  if (!conn?.bridgeIp || !conn?.applicationKey) {
+    throw new Error('Hue is not configured — set the bridge IP and pair first.');
+  }
+  const dispatcher = hueDispatcher(opts);
+  const response = await request(`https://${conn.bridgeIp}/clip/v2/resource/light/${lightId}`, {
+    method: 'PUT',
+    headers: {
+      'hue-application-key': conn.applicationKey,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ identify: { action: 'identify' } }),
+    dispatcher,
+    headersTimeout: 5000,
+    bodyTimeout: 5000,
+  });
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    const text = await response.body.text();
+    throw new Error(`Hue identify failed for ${lightId}: status ${response.statusCode} ${text}`);
+  }
+  await response.body.text();
+}

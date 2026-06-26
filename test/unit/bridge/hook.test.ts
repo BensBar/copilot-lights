@@ -3,7 +3,7 @@ import { createServer, Server } from 'node:net';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { runHook } from '../../../src/bridge/hook.js';
+import { runHook, resolveOrigin } from '../../../src/bridge/hook.js';
 
 describe('runHook', () => {
   let server: Server | null = null;
@@ -95,8 +95,10 @@ describe('runHook', () => {
       notificationType: 'info',
     });
 
-    // Should NOT include extra fields from stdin
-    expect(Object.keys(msg).sort()).toEqual([
+    // Should NOT include extra fields from stdin. `origin` is allowlisted but
+    // environment-derived (see resolveOrigin), so exclude it here — its
+    // presence depends on the test runner's terminal env, not on stdin.
+    expect(Object.keys(msg).filter((k) => k !== 'origin').sort()).toEqual([
       'cwd',
       'event',
       'kind',
@@ -319,5 +321,31 @@ describe('runHook', () => {
       expect(receivedMessages).toHaveLength(1, `Event ${event} should send message`);
       expect(receivedMessages[0].event).toBe(event);
     }
+  });
+});
+
+describe('resolveOrigin', () => {
+  it('prefers __CFBundleIdentifier (exact owning app)', () => {
+    expect(resolveOrigin({ __CFBundleIdentifier: 'com.github.githubapp' })).toBe('com.github.githubapp');
+    // Even when a TERM_PROGRAM is also present, the bundle id wins.
+    expect(
+      resolveOrigin({ __CFBundleIdentifier: 'com.mitchellh.ghostty', TERM_PROGRAM: 'iTerm.app' }),
+    ).toBe('com.mitchellh.ghostty');
+  });
+
+  it('maps TERM_PROGRAM to a terminal bundle id when no __CFBundleIdentifier', () => {
+    expect(resolveOrigin({ TERM_PROGRAM: 'iTerm.app' })).toBe('com.googlecode.iterm2');
+    expect(resolveOrigin({ TERM_PROGRAM: 'ghostty' })).toBe('com.mitchellh.ghostty');
+    expect(resolveOrigin({ TERM_PROGRAM: 'Apple_Terminal' })).toBe('com.apple.Terminal');
+    expect(resolveOrigin({ TERM_PROGRAM: 'vscode' })).toBe('com.microsoft.VSCode');
+  });
+
+  it('falls back to LC_TERMINAL and is case-insensitive', () => {
+    expect(resolveOrigin({ LC_TERMINAL: 'iTerm2' })).toBe('com.googlecode.iterm2');
+  });
+
+  it('returns undefined when nothing identifies the owner', () => {
+    expect(resolveOrigin({})).toBeUndefined();
+    expect(resolveOrigin({ TERM_PROGRAM: 'something-unknown' })).toBeUndefined();
   });
 });

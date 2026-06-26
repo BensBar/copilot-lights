@@ -58,4 +58,29 @@ final class DaemonStatusTests: XCTestCase {
         XCTAssertNil(reply.frame)
         XCTAssertEqual(reply.sessions, 0)
     }
+
+    /// The daemon now includes a per-session `origin` (owning-app bundle id)
+    /// so the menubar can focus the terminal/app on click. Older daemons omit
+    /// it, so it must decode as nil without failing.
+    func testDecodesSessionOrigin() throws {
+        let json = """
+        {
+          "kind": "status",
+          "state": "thinking",
+          "sessions": 2,
+          "sessionList": [
+            {"id": "s1", "cwd": "/repo", "lastEventTs": 1000, "state": "thinking", "origin": "com.mitchellh.ghostty"},
+            {"id": "s2", "cwd": "/other", "lastEventTs": 900, "state": "ready"}
+          ],
+          "adapter": {"kind": "mock", "ok": true, "lastError": null},
+          "frame": null,
+          "uptimeMs": 5
+        }
+        """
+        let reply = try decode(json)
+        let list = try XCTUnwrap(reply.sessionList)
+        XCTAssertEqual(list.first(where: { $0.id == "s1" })?.origin, "com.mitchellh.ghostty")
+        // Back-compat: a session without `origin` decodes to nil, not a throw.
+        XCTAssertNil(list.first(where: { $0.id == "s2" })?.origin)
+    }
 }

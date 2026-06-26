@@ -24,6 +24,8 @@ struct SettingsView: View {
                 }
                 Label("Adapter", systemImage: "cpu").tag(SettingsPane.adapter)
                 Label("Home Assistant", systemImage: "house").tag(SettingsPane.homeAssistant)
+                Label("Philips Hue", systemImage: "lightbulb.led").tag(SettingsPane.hue)
+                Label("Govee", systemImage: "lightbulb").tag(SettingsPane.govee)
                 Label("State Styles", systemImage: "paintpalette").tag(SettingsPane.styles)
                 Label("Test", systemImage: "bolt.horizontal.circle").tag(SettingsPane.test)
                 Label("Desktop Surfaces", systemImage: "rectangle.on.rectangle").tag(SettingsPane.desktop)
@@ -35,6 +37,8 @@ struct SettingsView: View {
                 switch selection {
                 case .adapter:        AdapterPane()
                 case .homeAssistant:  HomeAssistantPane()
+                case .hue:            HuePane()
+                case .govee:          GoveePane()
                 case .styles:         StateStylesPane()
                 case .test:           TestPane()
                 case .desktop:        DesktopSurfacesPane()
@@ -48,7 +52,7 @@ struct SettingsView: View {
 }
 
 enum SettingsPane: Hashable {
-    case adapter, homeAssistant, styles, test, desktop
+    case adapter, homeAssistant, hue, govee, styles, test, desktop
 }
 
 // MARK: - Adapter
@@ -58,19 +62,35 @@ struct AdapterPane: View {
 
     var body: some View {
         Form {
-            Section("Light adapter") {
-                Picker("Adapter", selection: Binding(
-                    get: { store.doc.adapter },
-                    set: { store.setAdapter($0) }
-                )) {
-                    ForEach(AdapterKind.allCases) { kind in
-                        Text(kind.label).tag(kind)
-                    }
-                }
-                .pickerStyle(.radioGroup)
-                Text(adapterHelp)
+            Section("Active light adapters") {
+                Text("Enable any combination — Copilot Lights drives all enabled backends at once. Configure each under its own tab first.")
                     .foregroundStyle(.secondary)
                     .font(.callout)
+                ForEach(realAdapters) { kind in
+                    Toggle(isOn: binding(for: kind)) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(kind.label)
+                            Text(adapterHelp(kind))
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                            if !isConfigured(kind) {
+                                Text("Not configured yet — open the \(kind.label) tab to set it up.")
+                                    .foregroundStyle(.orange)
+                                    .font(.caption2)
+                            }
+                        }
+                    }
+                    .disabled(!isConfigured(kind))
+                }
+                Toggle(isOn: mockBinding) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(AdapterKind.mock.label)
+                        Text(adapterHelp(.mock)).foregroundStyle(.secondary).font(.caption)
+                    }
+                }
+            }
+            Section {
+                Text(summaryLine).foregroundStyle(.secondary).font(.callout)
             }
             HStack {
                 Spacer()
@@ -86,12 +106,52 @@ struct AdapterPane: View {
         .formStyle(.grouped)
     }
 
-    private var adapterHelp: String {
-        switch store.doc.adapter {
-        case .homeAssistant: return "Drives lights via Home Assistant's REST API. Configure URL, token, and entities under the Home Assistant tab."
-        case .hue:           return "Drives lights via a local Philips Hue bridge. (Hue settings UI not yet implemented — edit ~/.copilot-lights/config.json directly.)"
-        case .govee:         return "Drives Govee bulbs/strips over your local network (LAN API). Enable \"LAN Control\" per device in the Govee Home app, then add device IPs to the \"govee\" block of ~/.copilot-lights/config.json."
-        case .mock:          return "No real lights. State changes are tracked in the daemon but not applied anywhere."
+    private var realAdapters: [AdapterKind] {
+        AdapterKind.allCases.filter { $0 != .mock }
+    }
+
+    private var enabled: [AdapterKind] { store.doc.enabledAdapters }
+
+    private func binding(for kind: AdapterKind) -> Binding<Bool> {
+        Binding(
+            get: { store.doc.enabledAdapters.contains(kind) },
+            set: { store.setAdapterEnabled(kind, $0) }
+        )
+    }
+
+    /// Mock is "on" only when no real backend is enabled (it's the fallback).
+    private var mockBinding: Binding<Bool> {
+        Binding(
+            get: { store.doc.enabledAdapters == [.mock] },
+            set: { on in
+                if on { store.setAdapters([]) } // collapses to mock fallback
+            }
+        )
+    }
+
+    private var summaryLine: String {
+        let active = enabled.map { $0.label }.joined(separator: ", ")
+        if enabled == [.mock] {
+            return "No real lights are enabled. State changes are tracked but not applied."
+        }
+        return "Driving: \(active)."
+    }
+
+    private func isConfigured(_ kind: AdapterKind) -> Bool {
+        switch kind {
+        case .govee:         return !(store.doc.govee?.devices.isEmpty ?? true)
+        case .hue:           return store.doc.hue != nil && !(store.doc.hue?.lightIds.isEmpty ?? true)
+        case .homeAssistant: return store.doc.homeAssistant != nil && !(store.doc.homeAssistant?.entities.isEmpty ?? true)
+        case .mock:          return true
+        }
+    }
+
+    private func adapterHelp(_ kind: AdapterKind) -> String {
+        switch kind {
+        case .homeAssistant: return "Drives lights via Home Assistant's REST API."
+        case .hue:           return "Drives lights via a local Philips Hue bridge."
+        case .govee:         return "Drives Govee bulbs/strips over your local network (LAN API)."
+        case .mock:          return "No real lights. State is tracked but not applied. Auto-used when nothing else is enabled."
         }
     }
 }
@@ -108,6 +168,7 @@ struct HomeAssistantPane: View {
     @State private var loading = false
     @State private var statusMsg: String?
     @State private var entitySearch: String = ""
+    @State private var blinkingId: String?
     private let client = HAEntityClient()
 
     var body: some View {
@@ -134,21 +195,50 @@ struct HomeAssistantPane: View {
                 } else {
                     TextField("Search", text: $entitySearch)
                         .textFieldStyle(.roundedBorder)
+                    HStack(spacing: 12) {
+                        Button("Select all") {
+                            selectedEntities = Set(filteredEntities.map { $0.entityId })
+                        }
+                        .disabled(filteredEntities.allSatisfy { selectedEntities.contains($0.entityId) })
+                        Button("Select none") {
+                            for e in filteredEntities { selectedEntities.remove(e.entityId) }
+                        }
+                        .disabled(filteredEntities.allSatisfy { !selectedEntities.contains($0.entityId) })
+                        Spacer()
+                        Text("Tap the wand to blink a light so you can find it.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.link)
                     List {
                         ForEach(filteredEntities) { e in
-                            Toggle(isOn: Binding(
-                                get: { selectedEntities.contains(e.entityId) },
-                                set: { on in
-                                    if on { selectedEntities.insert(e.entityId) }
-                                    else { selectedEntities.remove(e.entityId) }
+                            HStack(spacing: 8) {
+                                Toggle(isOn: Binding(
+                                    get: { selectedEntities.contains(e.entityId) },
+                                    set: { on in
+                                        if on { selectedEntities.insert(e.entityId) }
+                                        else { selectedEntities.remove(e.entityId) }
+                                    }
+                                )) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(e.displayName)
+                                        Text(e.entityId).font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
-                            )) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(e.displayName)
-                                    Text(e.entityId).font(.caption).foregroundStyle(.secondary)
+                                .toggleStyle(.checkbox)
+                                Spacer()
+                                Button {
+                                    blink(e.entityId, name: e.displayName)
+                                } label: {
+                                    if blinkingId == e.entityId {
+                                        ProgressView().controlSize(.small)
+                                    } else {
+                                        Image(systemName: "wand.and.rays")
+                                    }
                                 }
+                                .buttonStyle(.borderless)
+                                .disabled(blinkingId != nil)
+                                .help("Blink this light to locate it")
                             }
-                            .toggleStyle(.checkbox)
                         }
                     }
                     .frame(minHeight: 220)
@@ -226,12 +316,35 @@ struct HomeAssistantPane: View {
         return nil
     }
 
+    /// Blink one HA light through the daemon so the user can locate it. Requires
+    /// the connection to be saved (the daemon uses its own configured token).
+    private func blink(_ entityId: String, name: String) {
+        guard blinkingId == nil else { return }
+        blinkingId = entityId
+        Task {
+            let result = await store.identify(adapter: .homeAssistant, entityId: entityId)
+            await MainActor.run {
+                blinkingId = nil
+                if let result, result.ok {
+                    statusMsg = "✓ Blinking \(name)"
+                } else if let result {
+                    statusMsg = "✗ \(result.error ?? "Blink failed") — Save first so the daemon has your connection."
+                } else {
+                    statusMsg = "✗ Daemon offline — start Copilot Lights' daemon and retry."
+                }
+            }
+        }
+    }
+
     private func saveAndReload() {
         store.setHomeAssistant(
             baseUrl: baseUrl,
             tokenPlain: token.isEmpty ? nil : token,
             entities: Array(selectedEntities).sorted()
         )
+        if !selectedEntities.isEmpty {
+            store.enableAdapter(.homeAssistant)
+        }
         store.save()
         token = ""           // clear the field; secret now lives in Keychain
         hydrate()            // refresh placeholder

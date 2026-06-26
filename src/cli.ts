@@ -6,7 +6,8 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, defaultSocketPath, defaultSessionsPath } from './config/load.js';
+import { loadConfig, defaultSocketPath, defaultSessionsPath, defaultConfigPath } from './config/load.js';
+import { saveConfigFile } from './config/save.js';
 import { createAdapter } from './adapters/registry.js';
 import { Daemon } from './daemon/server.js';
 import { mainHook } from './bridge/hook-bin.js';
@@ -789,80 +790,355 @@ program
     console.log(`Following: ${kleur.green(chosen.id)}  ${kleur.dim(chosen.cwd ?? '')}`);
   });
 
+interface GoveeFound {
+  ip: string;
+  sku?: string;
+  name?: string;
+  mac?: string;
+}
+
+/**
+ * Normalise a MAC / device-id string for comparison: keep only hex digits and
+ * uppercase them. Govee reports MACs colon-separated (sometimes 8 groups), so
+ * this lets `AA:BB:CC...` match `aabbcc...` regardless of separators.
+ */
+export function normalizeMac(mac: string): string {
+  return mac.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+}
+
+/**
+ * Discover Govee devices, preferring a running daemon (which owns the
+ * multicast port) and falling back to a standalone scan. Returns the device
+ * list plus whether it came from the daemon.
+ */
+async function discoverGoveeDevices(
+  timeoutMs: number,
+  socketPath: string
+): Promise<{ devices: GoveeFound[]; fromDaemon: boolean } | { error: string }> {
+  const statusReply = await sendToDaemon({ kind: 'query', query: 'status' }, {
+    socketPath, timeoutMs: 1500, expectReply: true,
+  });
+  if (statusReply) {
+    try {
+      const status = JSON.parse(statusReply);
+      if (status.adapter?.kind === 'govee' && Array.isArray(status.goveeDevices)) {
+        return { devices: status.goveeDevices as GoveeFound[], fromDaemon: true };
+      }
+    } catch {
+      // fall through to standalone
+    }
+  }
+
+  const { GoveeAdapter } = await import('./adapters/govee.js');
+  const adapter = new GoveeAdapter({ devices: [], discoveryTimeoutMs: timeoutMs });
+  try {
+    await adapter.connect();
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+  const devices: GoveeFound[] =
+    (adapter as unknown as { discoveredDevices?: ReadonlyArray<GoveeFound> })
+      .discoveredDevices?.slice() ?? [];
+  await adapter.close();
+  return { devices, fromDaemon: false };
+}
+
+/** Pretty-print a discovered Govee device list with identified model + type. */
+async function printGoveeDeviceTable(found: GoveeFound[]): Promise<void> {
+  const { lookupGoveeModel, typeLabel } = await import('./adapters/govee-models.js');
+  for (const d of found) {
+    const info = lookupGoveeModel(d.sku);
+    const ip = kleur.green(d.ip.padEnd(15));
+    const sku = d.sku ? kleur.cyan(d.sku.padEnd(6)) : kleur.dim('(?)   ');
+    const model = `${info.model} ${kleur.dim(`[${typeLabel(info.type)}]`)}`;
+    const label = d.name ?? d.mac;
+    const trailer = label ? kleur.dim(`  ${d.name ? `"${d.name}"` : d.mac}`) : '';
+    console.log(`  ${ip} ${sku} ${model}${trailer}`);
+  }
+}
+
+const NOT_DISCOVERED_HINT =
+  'Make sure each device has "LAN Control" enabled in the Govee Home app and is on the same subnet as this Mac.';
+
+/**
+ * Merge discovered devices into the on-disk config and (optionally) write
+ * device-type-aware recommended scenes. Reads the *raw* config JSON so we never
+ * inline resolved `env:`/`keychain:` secrets or derived fields. Returns a short
+ * summary of what changed. Validates the result before writing.
+ */
+async function saveGoveeDevices(
+  found: GoveeFound[],
+  opts: { configPath?: string; withScenes: boolean }
+): Promise<{ path: string; added: number; total: number; sceneType: string | null }> {
+  const { ConfigSchema } = await import('./config/schema.js');
+  const { recommendScenes, dominantDeviceType, typeLabel } = await import('./adapters/govee-models.js');
+
+  const path = defaultConfigPath(opts.configPath);
+  let raw: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    try {
+      raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+    } catch (err) {
+      throw new Error(`existing config at ${path} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  raw.adapter = 'govee';
+  const govee = (typeof raw.govee === 'object' && raw.govee !== null ? raw.govee : {}) as Record<string, unknown>;
+  type StoredDevice = { ip: string; sku?: string; name?: string; mac?: string };
+  const existing = Array.isArray(govee.devices) ? (govee.devices as Array<{ ip?: string }>) : [];
+  const byIp = new Map<string, StoredDevice>();
+  for (const d of existing) {
+    if (d && typeof d.ip === 'string') byIp.set(d.ip, d as StoredDevice);
+  }
+  let added = 0;
+  for (const d of found) {
+    if (!byIp.has(d.ip)) added++;
+    // Layer discovered/supplied metadata over any existing entry so we never
+    // drop a name/sku/mac the user already had when only some fields are known.
+    const prev = byIp.get(d.ip) ?? { ip: d.ip };
+    byIp.set(d.ip, {
+      ip: d.ip,
+      ...(prev.sku || d.sku ? { sku: d.sku ?? prev.sku } : {}),
+      ...(prev.name || d.name ? { name: d.name ?? prev.name } : {}),
+      ...(prev.mac || d.mac ? { mac: d.mac ?? prev.mac } : {}),
+    });
+  }
+  govee.devices = Array.from(byIp.values());
+  raw.govee = govee;
+
+  // Recommended scenes for the dominant device type — only fill modes the user
+  // hasn't already customised, so re-running never clobbers manual tuning.
+  let sceneType: string | null = null;
+  if (opts.withScenes && found.length > 0) {
+    const type = dominantDeviceType(found);
+    const rec = recommendScenes(type);
+    const states = (typeof raw.states === 'object' && raw.states !== null ? raw.states : {}) as Record<string, unknown>;
+    let wroteAny = false;
+    for (const [state, style] of Object.entries(rec.states)) {
+      if (!(state in states)) {
+        states[state] = style;
+        wroteAny = true;
+      }
+    }
+    raw.states = states;
+    if (wroteAny) sceneType = typeLabel(type);
+  }
+
+  // Validate before persisting so we never write a config the daemon rejects.
+  ConfigSchema.parse(raw);
+  saveConfigFile(path, raw);
+
+  return { path, added, total: byIp.size, sceneType };
+}
+
 program
   .command('govee')
   .description('Govee adapter utilities')
   .addCommand(
     new Command('discover')
-      .description('Multicast-scan the local network for Govee LAN-control devices')
+      .description('Scan the local network for Govee LAN-control devices and identify each model')
       .option('--timeout <ms>', 'Discovery timeout in ms', '2500')
+      .option('--save', 'Save discovered devices into config.json and switch to the Govee adapter')
+      .option('--no-scenes', 'When saving, do not write device-type-aware recommended scenes')
+      .option('--config <path>', 'Path to config file (for --save)')
       .action(async (options) => {
         const timeoutMs = Number(options.timeout) || 2500;
         const socketPath = defaultSocketPath();
 
-        // First, try the daemon — if it's already running on the govee
-        // adapter it owns the multicast port and standalone discovery would
-        // fail. The daemon publishes its current discovered devices in
-        // `status.goveeDevices`.
-        const statusReply = await sendToDaemon({ kind: 'query', query: 'status' }, {
-          socketPath, timeoutMs: 1500, expectReply: true,
-        });
-        if (statusReply) {
-          try {
-            const status = JSON.parse(statusReply);
-            if (status.adapter?.kind === 'govee' && Array.isArray(status.goveeDevices)) {
-              const found: Array<{ ip: string; sku?: string; name?: string }> = status.goveeDevices;
-              if (found.length === 0) {
-                console.log(kleur.yellow('Daemon is running on the Govee adapter but has not discovered any devices yet.'));
-                console.log(kleur.dim('Make sure each device has "LAN Control" enabled in the Govee Home app and is on the same subnet as this Mac.'));
-                return;
-              }
-              console.log(kleur.dim('(reading from running daemon)'));
-              console.log(kleur.bold(`Found ${found.length} Govee device(s):`));
-              console.log();
-              for (const d of found) {
-                const sku = d.sku ? kleur.cyan(d.sku) : kleur.dim('(unknown)');
-                const name = d.name ? `  "${d.name}"` : '';
-                console.log(`  ${kleur.green(d.ip.padEnd(15))} ${sku}${name}`);
-              }
-              return;
-            }
-          } catch {
-            // fall through to standalone
-          }
-        }
-
-        // Standalone scan (no daemon, or daemon is not on the govee adapter).
-        const { GoveeAdapter } = await import('./adapters/govee.js');
-        const adapter = new GoveeAdapter({ devices: [], discoveryTimeoutMs: timeoutMs });
-        try {
-          await adapter.connect();
-        } catch (err) {
-          console.error(kleur.red(`discovery failed: ${err instanceof Error ? err.message : String(err)}`));
+        const result = await discoverGoveeDevices(timeoutMs, socketPath);
+        if ('error' in result) {
+          console.error(kleur.red(`discovery failed: ${result.error}`));
           process.exitCode = 1;
           return;
         }
-        const found: Array<{ ip: string; sku?: string; name?: string }> =
-          (adapter as unknown as { discoveredDevices?: ReadonlyArray<{ ip: string; sku?: string; name?: string }> })
-            .discoveredDevices?.slice() ?? [];
-        await adapter.close();
+        const { devices: found, fromDaemon } = result;
+
         if (found.length === 0) {
-          console.log(kleur.yellow('No Govee devices responded.'));
-          console.log(kleur.dim('Make sure each device has "LAN Control" enabled in the Govee Home app and is on the same subnet as this Mac.'));
+          if (fromDaemon) {
+            console.log(kleur.yellow('Daemon is running on the Govee adapter but has not discovered any devices yet.'));
+          } else {
+            console.log(kleur.yellow('No Govee devices responded.'));
+          }
+          console.log(kleur.dim(NOT_DISCOVERED_HINT));
           return;
         }
+
+        if (fromDaemon) console.log(kleur.dim('(reading from running daemon)'));
         console.log(kleur.bold(`Found ${found.length} Govee device(s):`));
         console.log();
-        for (const d of found) {
-          const sku = d.sku ? kleur.cyan(d.sku) : kleur.dim('(unknown)');
-          const name = d.name ? `  "${d.name}"` : '';
-          console.log(`  ${kleur.green(d.ip.padEnd(15))} ${sku}${name}`);
+        await printGoveeDeviceTable(found);
+        console.log();
+
+        if (options.save) {
+          try {
+            const summary = await saveGoveeDevices(found, {
+              configPath: options.config,
+              withScenes: options.scenes !== false,
+            });
+            console.log(
+              kleur.green('✓') +
+                ` Saved ${summary.total} device(s) (${summary.added} new) to ${summary.path}; adapter set to "govee".`
+            );
+            if (summary.sceneType) {
+              console.log(kleur.green('✓') + ` Wrote recommended scenes tuned for ${summary.sceneType}.`);
+            }
+            // Best-effort: tell a running daemon to reload the new config.
+            const reloaded = await sendToDaemon({ kind: 'reload' }, {
+              socketPath, timeoutMs: 1500, expectReply: true,
+            });
+            console.log(
+              reloaded
+                ? kleur.dim('Daemon reloaded with the new config.')
+                : kleur.dim('Start the daemon to use these lights: copilot-lights daemon')
+            );
+          } catch (err) {
+            console.error(kleur.red(`save failed: ${err instanceof Error ? err.message : String(err)}`));
+            process.exitCode = 1;
+          }
+          return;
+        }
+
+        console.log(kleur.dim('Save these and switch to the Govee adapter with:'));
+        console.log(kleur.dim('  copilot-lights govee discover --save'));
+      })
+  )
+  .addCommand(
+    new Command('recommend')
+      .description('Show recommended per-mode scenes for a device type (or for discovered devices)')
+      .option('--type <type>', 'Device type: bulb, light-strip, floor-lamp, table-lamp, wall-panel, tv-backlight, outdoor, string-lights')
+      .option('--timeout <ms>', 'Discovery timeout in ms when no --type is given', '2500')
+      .action(async (options) => {
+        const { recommendScenes, dominantDeviceType, typeLabel } =
+          await import('./adapters/govee-models.js');
+
+        let type = options.type as string | undefined;
+        if (!type) {
+          const socketPath = defaultSocketPath();
+          const result = await discoverGoveeDevices(Number(options.timeout) || 2500, socketPath);
+          if ('error' in result || result.devices.length === 0) {
+            console.log(kleur.yellow('No devices discovered — specify a device type with --type instead.'));
+            console.log(kleur.dim('  copilot-lights govee recommend --type floor-lamp'));
+            return;
+          }
+          type = dominantDeviceType(result.devices);
+          console.log(kleur.dim(`Discovered ${result.devices.length} device(s); dominant type: ${typeLabel(type as never)}`));
+          console.log();
+        }
+
+        const rec = recommendScenes(type as never);
+        if (options.type && rec.type === 'unknown' && options.type !== 'unknown') {
+          console.log(kleur.yellow(`Unknown device type "${options.type}" — showing balanced defaults.`));
+          console.log();
+        }
+        console.log(kleur.bold(`Recommended scenes for ${typeLabel(rec.type)}:`));
+        console.log(kleur.dim(rec.rationale));
+        console.log();
+        for (const [state, style] of Object.entries(rec.states)) {
+          const s = style as { color: string; brightness: number; effect: string };
+          console.log(
+            `  ${kleur.cyan(state.padEnd(15))} ${s.color}  ${String(s.brightness).padStart(3)}%  ${kleur.dim(s.effect)}`
+          );
         }
         console.log();
-        console.log(kleur.dim('Add the IPs you want to drive into ~/.copilot-lights/config.json:'));
-        console.log(kleur.dim('  "govee": { "devices": [' + found.map(d => `{"ip":"${d.ip}"}`).join(', ') + '] }'));
+        console.log(kleur.dim('Apply automatically while saving devices:'));
+        console.log(kleur.dim('  copilot-lights govee discover --save'));
+      })
+  )
+  .addCommand(
+    new Command('add')
+      .description('Add a single Govee device by IP, or by MAC (resolved via a discovery scan)')
+      .argument('[ip]', 'Device IP address (omit when using --mac)')
+      .option('--mac <mac>', 'Device MAC / id — resolved to its current IP via a discovery scan')
+      .option('--name <name>', 'Friendly name to store for the device')
+      .option('--sku <sku>', 'Device SKU (e.g. H6072) for model identification when adding by IP')
+      .option('--timeout <ms>', 'Discovery timeout in ms when using --mac', '2500')
+      .option('--no-scenes', 'Do not write device-type-aware recommended scenes')
+      .option('--config <path>', 'Path to config file')
+      .action(async (ip: string | undefined, options) => {
+        const socketPath = defaultSocketPath();
+
+        if (!ip && !options.mac) {
+          console.error(kleur.red('Provide an IP address or --mac <mac>.'));
+          console.error(kleur.dim('  copilot-lights govee add 192.168.4.114 --sku H6072 --name "Floor lamp"'));
+          console.error(kleur.dim('  copilot-lights govee add --mac AA:BB:CC:DD:EE:FF'));
+          process.exitCode = 1;
+          return;
+        }
+        if (ip && options.mac) {
+          console.error(kleur.red('Pass either an IP address or --mac, not both.'));
+          process.exitCode = 1;
+          return;
+        }
+
+        let device: GoveeFound;
+        if (options.mac) {
+          const wanted = normalizeMac(options.mac);
+          if (!wanted) {
+            console.error(kleur.red(`"${options.mac}" doesn't look like a MAC address.`));
+            process.exitCode = 1;
+            return;
+          }
+          console.log(kleur.dim('Scanning for the device by MAC…'));
+          const result = await discoverGoveeDevices(Number(options.timeout) || 2500, socketPath);
+          if ('error' in result) {
+            console.error(kleur.red(`discovery failed: ${result.error}`));
+            process.exitCode = 1;
+            return;
+          }
+          const match = result.devices.find((d) => d.mac && normalizeMac(d.mac) === wanted);
+          if (!match) {
+            console.error(kleur.red(`No device with MAC ${options.mac} responded.`));
+            console.error(kleur.dim(NOT_DISCOVERED_HINT));
+            process.exitCode = 1;
+            return;
+          }
+          device = {
+            ip: match.ip,
+            sku: match.sku ?? options.sku,
+            mac: match.mac,
+            ...(options.name ? { name: options.name } : {}),
+          };
+          console.log(kleur.dim(`Resolved ${options.mac} → ${match.ip}`));
+        } else {
+          device = {
+            ip: ip!,
+            ...(options.sku ? { sku: options.sku } : {}),
+            ...(options.name ? { name: options.name } : {}),
+          };
+        }
+
+        console.log();
+        await printGoveeDeviceTable([device]);
+        console.log();
+
+        try {
+          const summary = await saveGoveeDevices([device], {
+            configPath: options.config,
+            withScenes: options.scenes !== false,
+          });
+          console.log(
+            kleur.green('✓') +
+              ` Saved ${summary.total} device(s) (${summary.added} new) to ${summary.path}; adapter set to "govee".`
+          );
+          if (summary.sceneType) {
+            console.log(kleur.green('✓') + ` Wrote recommended scenes tuned for ${summary.sceneType}.`);
+          }
+          const reloaded = await sendToDaemon({ kind: 'reload' }, {
+            socketPath, timeoutMs: 1500, expectReply: true,
+          });
+          console.log(
+            reloaded
+              ? kleur.dim('Daemon reloaded with the new config.')
+              : kleur.dim('Start the daemon to use these lights: copilot-lights daemon')
+          );
+        } catch (err) {
+          console.error(kleur.red(`save failed: ${err instanceof Error ? err.message : String(err)}`));
+          process.exitCode = 1;
+        }
       })
   );
+
 
 function resolveBinaryPath(): string {
   // Prefer the user's invocation path if it ends in `copilot-lights` (i.e. the

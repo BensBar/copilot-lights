@@ -48,6 +48,15 @@ export const GoveeConfigSchema = z.object({
     ip: z.string().min(1),
     sku: z.string().optional(),
     name: z.string().optional(),
+    /** Device MAC / stable ID (from discovery). Stored for reference and to
+     *  re-resolve the IP later via `govee add --mac`. */
+    mac: z.string().optional(),
+    /** Manual device-type override (a `GoveeDeviceType` value, e.g.
+     *  "downlight"). Govee SKUs are opaque and have no public type map, so
+     *  auto-detection is best-effort; when the user corrects a light's type in
+     *  the UI it is persisted here and wins over the SKU-derived guess for
+     *  scene recommendations. */
+    type: z.string().optional(),
   })).default([]),
   /** Multicast discovery scan duration. Set to 0 to disable. */
   discoveryTimeoutMs: z.number().int().nonnegative().default(1500),
@@ -71,6 +80,14 @@ export const GoveeConfigSchema = z.object({
 
 export const ConfigSchema = z.object({
   adapter: z.enum(['home-assistant', 'hue', 'govee', 'mock']).default('mock'),
+  /**
+   * Optional multi-backend selection. When present and non-empty, the daemon
+   * drives ALL listed adapters at once (via a composite), and this takes
+   * precedence over the single `adapter` field. `adapter` is kept for
+   * backward-compatibility and as the fallback when `adapters` is absent.
+   * 'mock' is ignored when any real adapter is also listed.
+   */
+  adapters: z.array(z.enum(['home-assistant', 'hue', 'govee', 'mock'])).optional(),
   homeAssistant: HomeAssistantConfigSchema.optional(),
   hue: HueConfigSchema.optional(),
   govee: GoveeConfigSchema.default({ devices: [], discoveryTimeoutMs: 1500 }),
@@ -97,6 +114,10 @@ export const ConfigSchema = z.object({
   message: 'adapter "home-assistant" requires a "homeAssistant" block',
 }).refine((c) => c.adapter !== 'hue' || !!c.hue, {
   message: 'adapter "hue" requires a "hue" block',
+}).refine((c) => !(c.adapters ?? []).includes('home-assistant') || !!c.homeAssistant, {
+  message: 'adapters includes "home-assistant" but no "homeAssistant" block is configured',
+}).refine((c) => !(c.adapters ?? []).includes('hue') || !!c.hue, {
+  message: 'adapters includes "hue" but no "hue" block is configured',
 });
 
 export type CopilotLightsConfig = z.infer<typeof ConfigSchema>;

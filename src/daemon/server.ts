@@ -16,11 +16,16 @@ const EventMessageSchema = z.object({
   toolName: z.string().optional(),
   notificationType: z.string().optional(),
   cwd: z.string().optional(),
+  /** Bundle id of the GUI app that owns this session (terminal emulator or
+   *  the Copilot desktop app). App identifier only — see resolveOrigin(). */
+  origin: z.string().optional(),
 });
 
 const QueryMessageSchema = z.object({
   kind: z.literal('query'),
-  query: z.literal('status'),
+  query: z.enum(['status', 'goveeScan', 'hueScan', 'haScan']),
+  /** For `goveeScan`: how long to listen for discovery replies, in ms. */
+  timeoutMs: z.number().int().nonnegative().max(15000).optional(),
 });
 
 const SubscribeMessageSchema = z.object({
@@ -37,12 +42,29 @@ const FollowMessageSchema = z.object({
   sessionId: z.string().nullable().optional(),
 });
 
+/** Blink a single light so the user can physically locate it. Cross-adapter:
+ *  the `adapter` field selects which integration owns the target, and the
+ *  remaining fields identify the device within that integration. */
+const IdentifyMessageSchema = z.object({
+  kind: z.literal('identify'),
+  adapter: z.enum(['govee', 'hue', 'home-assistant']),
+  /** Govee: device IP (required for Govee). */
+  ip: z.string().optional(),
+  /** Govee: device MAC / stable id (reference only). */
+  mac: z.string().optional(),
+  /** Hue: light resource id. */
+  lightId: z.string().optional(),
+  /** Home Assistant: light entity id. */
+  entityId: z.string().optional(),
+});
+
 const WireMessageSchema = z.union([
   EventMessageSchema,
   QueryMessageSchema,
   SubscribeMessageSchema,
   ReloadMessageSchema,
   FollowMessageSchema,
+  IdentifyMessageSchema,
 ]);
 
 export interface DaemonOptions {
@@ -270,12 +292,13 @@ export class Daemon {
       lastDoneTs: number | null;
       state: string;
       lastToolName: string | null;
+      origin: string | null;
     }>;
     adapter: { kind: string; ok: boolean; lastError: string | null };
     frame: unknown;
     uptimeMs: number;
     followedSessionId: string | null;
-    goveeDevices: Array<{ ip: string; sku?: string; name?: string }> | null;
+    goveeDevices: Array<{ ip: string; sku?: string; name?: string; mac?: string }> | null;
   } {
     const snapshot = this.aggregator.snapshot();
     const frame = this.scheduler.computeFrame();
@@ -297,21 +320,46 @@ export class Daemon {
         lastDoneTs: s.lastDoneTs ?? null,
         state: s.state,
         lastToolName: s.lastToolName ?? null,
+        origin: s.origin ?? null,
       })),
       adapter: {
-        kind: this.adapter.kind,
+        kind: this.adapterKindLabel(),
         ok: this.adapterOk,
         lastError: this.lastAdapterError,
       },
       frame,
       uptimeMs: this.now() - this.startTime,
       followedSessionId: this.aggregator.getFollowedSession(),
-      goveeDevices:
-        this.adapter.kind === 'govee'
-          ? ((this.adapter as unknown as { discoveredDevices?: ReadonlyArray<{ ip: string; sku?: string; name?: string }> })
-              .discoveredDevices ?? []).map((d) => ({ ip: d.ip, sku: d.sku, name: d.name }))
-          : null,
+      goveeDevices: (() => {
+        const govee = this.findGoveeAdapter();
+        if (!govee) return null;
+        return (
+          (govee as unknown as { discoveredDevices?: ReadonlyArray<{ ip: string; sku?: string; name?: string; mac?: string }> })
+            .discoveredDevices ?? []
+        ).map((d) => ({ ip: d.ip, sku: d.sku, name: d.name, mac: d.mac }));
+      })(),
     };
+  }
+
+  /** Human-readable adapter label for status — a composite reports its
+   *  children (e.g. "composite(govee, hue)") so the UI/CLI shows what's live. */
+  private adapterKindLabel(): string {
+    const children = (this.adapter as unknown as { childKinds?: string[] }).childKinds;
+    if (children && children.length > 0) {
+      return `composite(${children.join(', ')})`;
+    }
+    return this.adapter.kind;
+  }
+
+  /** Locate the live Govee adapter whether it's the sole adapter or wrapped in
+   *  a composite, so discovered-device reporting keeps working in both modes. */
+  private findGoveeAdapter(): LightAdapter | null {
+    if (this.adapter.kind === 'govee') return this.adapter;
+    const children = (this.adapter as unknown as { children?: LightAdapter[] }).children;
+    if (Array.isArray(children)) {
+      return children.find((c) => c.kind === 'govee') ?? null;
+    }
+    return null;
   }
 
   private handleConnection(socket: import('node:net').Socket): void {
@@ -384,8 +432,56 @@ export class Daemon {
         this.handleEvent(msg);
         socket.end(); // Fire-and-forget, no reply
       } else if (msg.kind === 'query') {
-        const response = this.statusPayload();
-        socket.end(JSON.stringify(response) + '\n');
+        if (msg.query === 'goveeScan') {
+          const scanTimeoutMs = msg.timeoutMs ?? 3000;
+          // The default 1s idle timeout would destroy the socket before the
+          // discovery window closes; extend it to cover the scan plus slack.
+          socket.setTimeout(scanTimeoutMs + 2000);
+          this.handleGoveeScan(scanTimeoutMs)
+            .then((result) => {
+              socket.end(JSON.stringify(result) + '\n');
+            })
+            .catch((err) => {
+              socket.end(
+                JSON.stringify({
+                  kind: 'govee-scan',
+                  devices: [],
+                  scenesByType: {},
+                  rationaleByType: {},
+                  error: err instanceof Error ? err.message : String(err),
+                }) + '\n'
+              );
+            });
+        } else if (msg.query === 'hueScan') {
+          socket.setTimeout(8000);
+          this.handleHueScan()
+            .then((result) => socket.end(JSON.stringify(result) + '\n'))
+            .catch((err) =>
+              socket.end(
+                JSON.stringify({
+                  kind: 'hue-scan',
+                  lights: [],
+                  error: err instanceof Error ? err.message : String(err),
+                }) + '\n'
+              )
+            );
+        } else if (msg.query === 'haScan') {
+          socket.setTimeout(8000);
+          this.handleHaScan()
+            .then((result) => socket.end(JSON.stringify(result) + '\n'))
+            .catch((err) =>
+              socket.end(
+                JSON.stringify({
+                  kind: 'ha-scan',
+                  lights: [],
+                  error: err instanceof Error ? err.message : String(err),
+                }) + '\n'
+              )
+            );
+        } else {
+          const response = this.statusPayload();
+          socket.end(JSON.stringify(response) + '\n');
+        }
       } else if (msg.kind === 'subscribe') {
         this.handleSubscribe(socket);
       } else if (msg.kind === 'reload') {
@@ -416,6 +512,23 @@ export class Daemon {
             followedSessionId: id,
           }) + '\n'
         );
+      } else if (msg.kind === 'identify') {
+        // Extend the idle timeout: the blink sequence takes a couple of
+        // seconds, longer than the default 1s socket timeout.
+        socket.setTimeout(8000);
+        this.handleIdentify(msg)
+          .then(() => {
+            socket.end(JSON.stringify({ kind: 'identify-result', ok: true }) + '\n');
+          })
+          .catch((err) => {
+            socket.end(
+              JSON.stringify({
+                kind: 'identify-result',
+                ok: false,
+                error: err instanceof Error ? err.message : String(err),
+              }) + '\n'
+            );
+          });
       }
     } catch (err) {
       // Malformed JSON or other parse error
@@ -437,6 +550,7 @@ export class Daemon {
       toolName: msg.toolName,
       notificationType: msg.notificationType,
       cwd: msg.cwd,
+      origin: msg.origin,
     };
 
     try {
@@ -490,6 +604,138 @@ export class Daemon {
   }
 
   /**
+   * Blink a single light so the user can physically locate it during setup.
+   * Dispatches to the integration named in the message. Self-contained per
+   * adapter — does not require that integration to be the active driver.
+   */
+  private async handleIdentify(msg: {
+    adapter: 'govee' | 'hue' | 'home-assistant';
+    ip?: string;
+    mac?: string;
+    lightId?: string;
+    entityId?: string;
+  }): Promise<void> {
+    if (msg.adapter === 'govee') {
+      if (!msg.ip) throw new Error('Govee identify requires a device IP');
+      const { blinkGoveeDevice } = await import('../adapters/govee.js');
+      await blinkGoveeDevice(msg.ip);
+      return;
+    }
+    if (msg.adapter === 'hue') {
+      if (!msg.lightId) throw new Error('Hue identify requires a lightId');
+      const { blinkHueLight } = await import('../adapters/hue.js');
+      await blinkHueLight(this.config.hue, msg.lightId);
+      return;
+    }
+    if (msg.adapter === 'home-assistant') {
+      if (!msg.entityId) throw new Error('Home Assistant identify requires an entityId');
+      const { blinkHomeAssistantEntity } = await import('../adapters/home-assistant.js');
+      await blinkHomeAssistantEntity(this.config.homeAssistant, msg.entityId);
+      return;
+    }
+    throw new Error(`Unknown identify adapter: ${String(msg.adapter)}`);
+  }
+
+  /** Discover Hue lights for the setup UI (select / blink / save flow). */
+  private async handleHueScan(): Promise<{
+    kind: 'hue-scan';
+    lights: Array<{ id: string; name: string; archetype?: string }>;
+  }> {
+    const { discoverHueLights } = await import('../adapters/hue.js');
+    const lights = await discoverHueLights(this.config.hue);
+    return { kind: 'hue-scan', lights };
+  }
+
+  /** Discover Home Assistant `light.*` entities for the setup UI. */
+  private async handleHaScan(): Promise<{
+    kind: 'ha-scan';
+    lights: Array<{ entityId: string; name: string }>;
+  }> {
+    const { discoverHomeAssistantLights } = await import('../adapters/home-assistant.js');
+    const lights = await discoverHomeAssistantLights(this.config.homeAssistant);
+    return { kind: 'ha-scan', lights };
+  }
+
+  /**
+   * Perform an on-demand Govee LAN discovery scan and return the responding
+   * devices enriched with model/type info plus per-type recommended scene
+   * sets. Drives the Settings UI "Scan for devices" flow.
+   *
+   * If the active adapter is already Govee we reuse its socket (it's bound to
+   * the 4002 reply port); otherwise we spin up a transient adapter just for
+   * the scan and tear it down afterwards. Independent of which adapter is
+   * currently driving the lights.
+   */
+  private async handleGoveeScan(timeoutMs: number): Promise<{
+    kind: 'govee-scan';
+    devices: Array<{ ip: string; sku?: string; mac?: string; model: string; type: string; typeLabel: string }>;
+    scenesByType: Record<string, Record<string, unknown>>;
+    rationaleByType: Record<string, string>;
+  }> {
+    const { GoveeAdapter } = await import('../adapters/govee.js');
+    const { lookupGoveeModel, typeLabel, recommendScenes, asGoveeDeviceType } = await import(
+      '../adapters/govee-models.js'
+    );
+
+    // Manual per-device type overrides keyed by MAC and IP, so a light the user
+    // re-typed in the UI keeps that type (and its tailored scenes) on rescan.
+    const overrides = new Map<string, string>();
+    for (const d of this.config.govee?.devices ?? []) {
+      const t = asGoveeDeviceType(d.type);
+      if (!t) continue;
+      if (d.mac) overrides.set(d.mac.toUpperCase(), t);
+      if (d.ip) overrides.set(d.ip, t);
+    }
+
+    type RawDevice = { ip: string; sku?: string; mac?: string };
+    let raw: RawDevice[];
+
+    if (this.adapter.kind === 'govee') {
+      const govee = this.adapter as unknown as { discover(ms: number): Promise<RawDevice[]> };
+      raw = await govee.discover(timeoutMs);
+    } else {
+      const transient = new GoveeAdapter({
+        ...this.config.govee,
+        devices: [],
+        discoveryTimeoutMs: 0,
+      });
+      await transient.connect();
+      try {
+        raw = await transient.discover(timeoutMs);
+      } finally {
+        await transient.close();
+      }
+    }
+
+    const devices = raw.map((d) => {
+      const info = lookupGoveeModel(d.sku);
+      const override =
+        (d.mac && overrides.get(d.mac.toUpperCase())) || overrides.get(d.ip) || undefined;
+      const resolvedType = (asGoveeDeviceType(override) ?? info.type) as typeof info.type;
+      return {
+        ip: d.ip,
+        sku: d.sku,
+        mac: d.mac,
+        model: info.model,
+        type: resolvedType,
+        typeLabel: typeLabel(resolvedType),
+      };
+    });
+
+    const scenesByType: Record<string, Record<string, unknown>> = {};
+    const rationaleByType: Record<string, string> = {};
+    for (const d of devices) {
+      if (!scenesByType[d.type]) {
+        const rec = recommendScenes(d.type as Parameters<typeof recommendScenes>[0]);
+        scenesByType[d.type] = rec.states;
+        rationaleByType[d.type] = rec.rationale;
+      }
+    }
+
+    return { kind: 'govee-scan', devices, scenesByType, rationaleByType };
+  }
+
+  /**
    * Re-read the config file and hot-swap the parts of the daemon that can be
    * changed safely at runtime: state styles, transition timing, errorTtl /
    * doneTtl, and the adapter when it can be reconstructed cleanly. If the
@@ -522,8 +768,10 @@ export class Daemon {
 
     const adapterChanged =
       next.adapter !== this.config.adapter ||
+      JSON.stringify(next.adapters) !== JSON.stringify(this.config.adapters) ||
       JSON.stringify(next.homeAssistant) !== JSON.stringify(this.config.homeAssistant) ||
-      JSON.stringify(next.hue) !== JSON.stringify(this.config.hue);
+      JSON.stringify(next.hue) !== JSON.stringify(this.config.hue) ||
+      JSON.stringify(next.govee) !== JSON.stringify(this.config.govee);
 
     this.config = next;
 

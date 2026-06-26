@@ -100,28 +100,55 @@ class MenuBuilder: NSObject, NSMenuDelegate {
                 }
 
                 for session in sorted {
-                    // Primary item: click to toggle follow on this session.
-                    let item = NSMenuItem(title: "",
-                                          action: #selector(toggleFollow(_:)),
-                                          keyEquivalent: "")
-                    item.attributedTitle = sessionRowAttributedTitle(session, nowMs: nowMs)
-                    item.representedObject = session.id
+                    let hasOrigin = (session.origin?.isEmpty == false)
+                    let appName = hasOrigin ? Self.appDisplayName(forBundleId: session.origin!) : nil
+
+                    // Primary item (no modifier): open the owning app/terminal
+                    // when we know it; otherwise fall back to toggling follow so
+                    // the row is still actionable.
+                    let item = NSMenuItem(
+                        title: "",
+                        action: hasOrigin ? #selector(openSessionApp(_:)) : #selector(toggleFollow(_:)),
+                        keyEquivalent: "")
+                    item.attributedTitle = sessionRowAttributedTitle(session, nowMs: nowMs, appName: appName)
+                    item.representedObject = hasOrigin ? session.origin : session.id
                     item.target = self
-                    item.toolTip = "Click to \(session.id == followedId ? "unfollow" : "follow") · ⌥ Option-click to reveal cwd in Finder"
+                    if hasOrigin {
+                        item.toolTip = "Click to open \(appName ?? "the owning app") · ⌥ follow · ⌃ reveal cwd in Finder"
+                    } else {
+                        item.toolTip = "Click to \(session.id == followedId ? "unfollow" : "follow") · ⌥ follow · ⌃ reveal cwd in Finder"
+                    }
                     item.state = (session.id == followedId) ? .on : .off
                     menu.addItem(item)
 
-                    // Hidden alternate (⌥ Option held): reveal cwd in Finder.
+                    // ⌥ Option alternate: toggle follow (bulb tracks only this
+                    // session). Present on every row so following stays one
+                    // keystroke away even when plain-click now opens the app.
+                    let followAlt = NSMenuItem(
+                        title: "Follow",
+                        action: #selector(toggleFollow(_:)),
+                        keyEquivalent: "")
+                    let followVerb = (session.id == followedId) ? "Unfollow" : "Follow"
+                    followAlt.attributedTitle = sessionRowAttributedTitle(session, nowMs: nowMs, suffix: " — \(followVerb)")
+                    followAlt.representedObject = session.id
+                    followAlt.target = self
+                    followAlt.isAlternate = true
+                    followAlt.keyEquivalentModifierMask = [.option]
+                    followAlt.state = (session.id == followedId) ? .on : .off
+                    menu.addItem(followAlt)
+
+                    // ⌃ Control alternate: reveal the session's cwd in Finder.
                     if let cwd = session.cwd, !cwd.isEmpty {
-                        let alt = NSMenuItem(title: "Reveal in Finder",
-                                             action: #selector(revealSessionCwd(_:)),
-                                             keyEquivalent: "")
-                        alt.attributedTitle = sessionRowAttributedTitle(session, nowMs: nowMs, suffix: " — Reveal in Finder")
-                        alt.representedObject = cwd
-                        alt.target = self
-                        alt.isAlternate = true
-                        alt.keyEquivalentModifierMask = [.option]
-                        menu.addItem(alt)
+                        let revealAlt = NSMenuItem(
+                            title: "Reveal in Finder",
+                            action: #selector(revealSessionCwd(_:)),
+                            keyEquivalent: "")
+                        revealAlt.attributedTitle = sessionRowAttributedTitle(session, nowMs: nowMs, suffix: " — Reveal in Finder")
+                        revealAlt.representedObject = cwd
+                        revealAlt.target = self
+                        revealAlt.isAlternate = true
+                        revealAlt.keyEquivalentModifierMask = [.control]
+                        menu.addItem(revealAlt)
                     }
                 }
             }
@@ -266,6 +293,35 @@ class MenuBuilder: NSObject, NSMenuDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
+    /// Bring the GUI app that owns a session (terminal emulator or the Copilot
+    /// desktop app) to the foreground. `representedObject` is the app's bundle
+    /// identifier, captured by the hook and threaded through the daemon.
+    @objc private func openSessionApp(_ sender: NSMenuItem) {
+        guard let bundleId = sender.representedObject as? String, !bundleId.isEmpty else { return }
+        let ws = NSWorkspace.shared
+        guard let url = ws.urlForApplication(withBundleIdentifier: bundleId) else {
+            // App isn't installed / resolvable on this machine — fail quietly
+            // with a beep rather than silently doing nothing.
+            NSSound.beep()
+            return
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        ws.openApplication(at: url, configuration: config, completionHandler: nil)
+    }
+
+    /// Friendly display name for a bundle id (e.g. "com.mitchellh.ghostty" →
+    /// "Ghostty"). Returns nil when the app can't be resolved on this machine.
+    static func appDisplayName(forBundleId bundleId: String) -> String? {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else {
+            return nil
+        }
+        if let name = (try? url.resourceValues(forKeys: [.localizedNameKey]))?.localizedName {
+            return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
+        }
+        return url.deletingPathExtension().lastPathComponent
+    }
+
     @objc private func toggleFollow(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         // If this session is already followed → unfollow (back to aggregate).
@@ -325,7 +381,7 @@ class MenuBuilder: NSObject, NSMenuDelegate {
     /// state colour. Falls back gracefully when the daemon doesn't supply
     /// per-session state (older daemon, edge cases). Idle sessions render
     /// dimmed with their last-event age in place of the tool name.
-    private func sessionRowAttributedTitle(_ session: SessionDetail, nowMs: Int, suffix: String? = nil) -> NSAttributedString {
+    private func sessionRowAttributedTitle(_ session: SessionDetail, nowMs: Int, suffix: String? = nil, appName: String? = nil) -> NSAttributedString {
         let stateName = session.state ?? "ready"
         let idle = Self.isIdle(session, nowMs: nowMs)
         let style = configStore.doc.style(for: stateName)
@@ -397,6 +453,17 @@ class MenuBuilder: NSObject, NSMenuDelegate {
                 attributes: [
                     .font: NSFont.menuFont(ofSize: 0),
                     .foregroundColor: NSColor.systemYellow.withAlphaComponent(0.85),
+                ]
+            ))
+        }
+        // Owning app hint (e.g. "↗ Ghostty") so the user can see — and is
+        // reminded they can click to focus — where each stream is running.
+        if let appName = appName, !appName.isEmpty {
+            attr.append(NSAttributedString(
+                string: "  ↗ " + appName,
+                attributes: [
+                    .font: NSFont.menuFont(ofSize: 0),
+                    .foregroundColor: NSColor.tertiaryLabelColor,
                 ]
             ))
         }
