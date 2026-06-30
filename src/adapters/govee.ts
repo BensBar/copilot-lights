@@ -1,4 +1,5 @@
 import * as dgram from 'node:dgram';
+import * as os from 'node:os';
 import type { LightAdapter, LightFrame, LightSnapshot } from './adapter.js';
 import type { z } from 'zod';
 import type { GoveeConfigSchema } from '../config/schema.js';
@@ -62,6 +63,15 @@ export function buildDiscoveryPacket(): Buffer {
   }));
 }
 
+/** Per-device status request. Govee lights answer this unicast on UDP/4002
+ *  even on networks where multicast discovery is filtered, which makes it the
+ *  reliable probe for a unicast subnet sweep. */
+export function buildDevStatusPacket(): Buffer {
+  return Buffer.from(JSON.stringify({
+    msg: { cmd: 'devStatus', data: {} },
+  }));
+}
+
 export function buildTurnPacket(on: boolean): Buffer {
   return Buffer.from(JSON.stringify({
     msg: { cmd: 'turn', data: { value: on ? 1 : 0 } },
@@ -114,6 +124,66 @@ export function parseDiscoveryResponse(buf: Buffer): GoveeDevice | null {
     sku: typeof data.sku === 'string' ? data.sku : undefined,
     mac: typeof data.device === 'string' && data.device.length > 0 ? data.device : undefined,
   };
+}
+
+/**
+ * True if a packet looks like a Govee `devStatus` reply (onOff / brightness /
+ * color / colorTemInKelvin shape). Unlike a `scan` reply it carries no IP, so
+ * callers take the responder address from the UDP rinfo. Never throws.
+ */
+export function looksLikeGoveeStatusReply(buf: Buffer): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(buf.toString('utf8'));
+  } catch {
+    return false;
+  }
+  const msg = (parsed as { msg?: unknown } | null)?.msg;
+  if (!msg || typeof msg !== 'object') return false;
+  const m = msg as { cmd?: unknown; data?: unknown };
+  if (m.cmd !== 'devStatus') return false;
+  const data = m.data;
+  if (!data || typeof data !== 'object') return false;
+  const d = data as Record<string, unknown>;
+  return 'onOff' in d || 'brightness' in d || 'color' in d || 'colorTemInKelvin' in d;
+}
+
+/**
+ * Enumerate unicast probe targets for the local IPv4 /24(s). Govee LAN
+ * discovery is multicast-only by spec, but many home networks (incl. some
+ * mesh/AP setups) filter 239.255.255.250, so devices never hear the scan. A
+ * direct unicast probe to each host on the local /24 reaches them anyway.
+ *
+ * Only private-range, non-internal IPv4 interfaces are swept, the host's own
+ * address is skipped, and the range is hard-capped so this can never blow up
+ * on an unusual netmask.
+ */
+export function localSweepTargets(maxHosts = 1024): string[] {
+  const targets: string[] = [];
+  const seen = new Set<string>();
+  const ifaces = os.networkInterfaces();
+  for (const addrs of Object.values(ifaces)) {
+    for (const a of addrs ?? []) {
+      if (a.family !== 'IPv4' || a.internal) continue;
+      const octets = a.address.split('.').map((n) => Number.parseInt(n, 10));
+      if (octets.length !== 4 || octets.some((n) => Number.isNaN(n))) continue;
+      const [o0, o1] = octets as [number, number, number, number];
+      const isPrivate =
+        o0 === 10 ||
+        (o0 === 172 && o1 >= 16 && o1 <= 31) ||
+        (o0 === 192 && o1 === 168);
+      if (!isPrivate) continue;
+      const base = `${octets[0]}.${octets[1]}.${octets[2]}.`;
+      for (let host = 1; host <= 254; host++) {
+        const ip = `${base}${host}`;
+        if (ip === a.address || seen.has(ip)) continue;
+        seen.add(ip);
+        targets.push(ip);
+        if (targets.length >= maxHosts) return targets;
+      }
+    }
+  }
+  return targets;
 }
 
 // ---------- Identify / blink (find-my-light) ----------
@@ -302,27 +372,75 @@ export class GoveeAdapter implements LightAdapter {
     }
   }
 
-  /** Fire one multicast discovery packet and collect responses for the
-   *  given time window. Resolves with the list of devices that replied. */
+  /** Discover Govee devices within a single `timeoutMs` budget.
+   *
+   *  Fires the standard multicast scan AND a unicast subnet sweep
+   *  concurrently, then listens on the shared socket until the deadline.
+   *  Multicast yields rich `scan` replies (ip + sku + mac); the unicast sweep
+   *  catches devices on networks that filter multicast, recovering their IP
+   *  from the responder address. Both run inside the same window, so total
+   *  latency stays ≈ `timeoutMs` (never a multiple of it). */
   async discover(timeoutMs: number): Promise<GoveeDevice[]> {
     if (!this.socket) throw new Error('GoveeAdapter not connected');
     const found = new Map<string, GoveeDevice>();
-    const onMessage = (buf: Buffer, _rinfo: dgram.RemoteInfo): void => {
+    const onMessage = (buf: Buffer, rinfo: dgram.RemoteInfo): void => {
       const dev = parseDiscoveryResponse(buf);
-      if (dev) found.set(dev.ip, dev);
+      if (dev) {
+        // `scan` reply — merge over any prior bare entry for this IP.
+        const prior = found.get(dev.ip);
+        found.set(dev.ip, {
+          ip: dev.ip,
+          sku: dev.sku ?? prior?.sku,
+          mac: dev.mac ?? prior?.mac,
+          name: prior?.name,
+        });
+      } else if (looksLikeGoveeStatusReply(buf)) {
+        // `devStatus` reply — no IP in the body, take it from the sender.
+        const ip = rinfo.address;
+        if (ip && !found.has(ip)) found.set(ip, { ip });
+      }
     };
     this.socket.on('message', onMessage);
     try {
-      const packet = buildDiscoveryPacket();
-      await new Promise<void>((resolve, reject) => {
-        this.socket!.send(packet, 4001, '239.255.255.250', (err) => {
-          if (err) reject(err);
-          else resolve();
+      const send = (packet: Buffer, port: number, addr: string): Promise<void> =>
+        new Promise<void>((resolve) => {
+          // Per-host failures (e.g. unreachable address) are non-fatal — a
+          // missing reply simply means "no device there".
+          this.socket!.send(packet, port, addr, () => resolve());
         });
-      });
+
+      const scanPacket = buildDiscoveryPacket();
+      const statusPacket = buildDevStatusPacket();
+      const targets = localSweepTargets();
+
+      // Fire one sweep "wave": a multicast scan plus, for every host not yet
+      // fully resolved (no sku), a unicast scan (4001, for sku/mac) and a
+      // devStatus (4003, reliable liveness wake). The `scan` command is only
+      // answered on the discovery port (4001) — sent to the control port (4003)
+      // devices stay silent, yielding bare-IP entries with no model. Hosts that
+      // already returned a sku are skipped to keep later waves cheap.
+      const fireWave = async (): Promise<void> => {
+        const sends: Array<Promise<void>> = [send(scanPacket, 4001, '239.255.255.250')];
+        for (const ip of targets) {
+          if (found.get(ip)?.sku) continue;
+          sends.push(send(scanPacket, 4001, ip));
+          sends.push(send(statusPacket, 4003, ip));
+        }
+        await Promise.all(sends);
+      };
+
+      // Repeat waves across the window so UDP loss on any single packet is
+      // recovered by a later retry, but stop firing ~500ms before the deadline
+      // so the final wave's replies still have time to land. We keep listening
+      // for the full window regardless. Total latency stays ≈ `timeoutMs`.
       const deadline = this.now() + Math.max(0, timeoutMs);
+      const stopFiringAt = deadline - 500;
+      const waveSpacingMs = 700;
+      await fireWave();
       while (this.now() < deadline) {
-        await new Promise((r) => setTimeout(r, Math.min(50, deadline - this.now())));
+        const remaining = deadline - this.now();
+        await new Promise((r) => setTimeout(r, Math.min(waveSpacingMs, remaining)));
+        if (this.now() < stopFiringAt) await fireWave();
       }
     } finally {
       this.socket.removeListener('message', onMessage);

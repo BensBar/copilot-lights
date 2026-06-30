@@ -85,6 +85,7 @@ const GOVEE_MODELS: Readonly<Record<string, CatalogEntry>> = {
   H6076: { model: 'RGBICW Corner Floor Lamp', type: 'floor-lamp' },
   H6078: { model: 'Cylinder Floor Lamp', type: 'floor-lamp' },
   H607C: { model: 'RGBIC Floor Lamp', type: 'floor-lamp' },
+  H60B0: { model: 'RGBICWW Smart Floor Lamp', type: 'floor-lamp' },
 
   // ---- Table lamps ----
   H6052: { model: 'RGBICWW Table Lamp', type: 'table-lamp' },
