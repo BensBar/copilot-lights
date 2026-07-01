@@ -164,6 +164,103 @@ describe('Govee adapter', () => {
       expect(socket.sent[3]!.ip).toBe('10.0.0.6');
     });
 
+    it('one unreachable device does not starve the others or throw', async () => {
+      // Socket that rejects any send to the "dead" IP with EHOSTUNREACH,
+      // exactly like a Govee device that powered off or changed IP.
+      class PartialFailSocket extends FakeSocket {
+        deadIp = '10.0.0.5';
+        override send(
+          msg: Buffer,
+          port: number,
+          ip: string,
+          cb?: (err: Error | null) => void
+        ): void {
+          if (ip === this.deadIp) {
+            if (cb) setImmediate(() => cb(new Error('send EHOSTUNREACH 10.0.0.5:4003')));
+            return;
+          }
+          this.sent.push({ msg: Buffer.from(msg), port, ip });
+          if (cb) setImmediate(() => cb(null));
+        }
+      }
+      const s = new PartialFailSocket();
+      adapter = new GoveeAdapter(
+        { devices: [{ ip: '10.0.0.5' }, { ip: '10.0.0.6' }], discoveryTimeoutMs: 0 },
+        { socketFactory: () => s as any, minSendIntervalMs: 0, interPacketGapMs: 0 }
+      );
+      await adapter.connect();
+
+      // Must not reject even though the first device is unreachable.
+      await expect(
+        adapter.applyFrame({ rgb: { r: 255, g: 0, b: 128 }, brightness: 60 })
+      ).resolves.toBeUndefined();
+
+      // The healthy device still received all three packets.
+      expect(s.sent).toHaveLength(3);
+      expect(s.sent.every((p) => p.ip === '10.0.0.6')).toBe(true);
+    });
+
+    it('applyFrame rejects only when every device is unreachable', async () => {
+      class AllFailSocket extends FakeSocket {
+        override send(
+          _msg: Buffer,
+          _port: number,
+          _ip: string,
+          cb?: (err: Error | null) => void
+        ): void {
+          if (cb) setImmediate(() => cb(new Error('send EHOSTUNREACH')));
+        }
+      }
+      const s = new AllFailSocket();
+      adapter = new GoveeAdapter(
+        { devices: [{ ip: '10.0.0.5' }], discoveryTimeoutMs: 0 },
+        { socketFactory: () => s as any, minSendIntervalMs: 0, interPacketGapMs: 0 }
+      );
+      await adapter.connect();
+      await expect(
+        adapter.applyFrame({ rgb: { r: 1, g: 2, b: 3 }, brightness: 50 })
+      ).rejects.toThrow(/EHOSTUNREACH/);
+    });
+
+    it('trailing flush to an unreachable device does not raise unhandledRejection', async () => {
+      // Regression: the scheduleFlush() timer fires outside any applyFrame()
+      // call chain, so a UDP send rejection there must be swallowed or it
+      // crashes the daemon with an uncaught exception.
+      class DeadSocket extends FakeSocket {
+        override send(
+          _msg: Buffer,
+          _port: number,
+          _ip: string,
+          cb?: (err: Error | null) => void
+        ): void {
+          if (cb) setImmediate(() => cb(new Error('send EHOSTDOWN')));
+        }
+      }
+      const s = new DeadSocket();
+      adapter = new GoveeAdapter(
+        { devices: [{ ip: '10.0.0.5' }], discoveryTimeoutMs: 0 },
+        { socketFactory: () => s as any, minSendIntervalMs: 50, interPacketGapMs: 0 }
+      );
+      await adapter.connect();
+
+      let unhandled: unknown = null;
+      const onUnhandled = (err: unknown): void => {
+        unhandled = err;
+      };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        // First send happens immediately (and rejects — caught by the caller).
+        await adapter.applyFrame({ rgb: { r: 1, g: 2, b: 3 }, brightness: 50 }).catch(() => undefined);
+        // A second frame within the throttle window arms the trailing flush.
+        await adapter.applyFrame({ rgb: { r: 4, g: 5, b: 6 }, brightness: 60 }).catch(() => undefined);
+        // Let the trailing-flush timer fire and its rejection settle.
+        await new Promise((r) => setTimeout(r, 80));
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled);
+      }
+      expect(unhandled).toBeNull();
+    });
+
     it('applyFrame with brightness 0 only sends turn-off (no color/brightness)', async () => {
       adapter = new GoveeAdapter(
         { devices: [{ ip: '10.0.0.5' }], discoveryTimeoutMs: 0 },

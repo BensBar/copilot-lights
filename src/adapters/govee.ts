@@ -496,7 +496,13 @@ export class GoveeAdapter implements LightAdapter {
     if (this.flushTimer !== null) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
-      void this.maybeFlush();
+      // Fire-and-forget trailing flush: this runs outside any applyFrame()
+      // call chain, so there's no upstream .catch() to absorb a UDP send
+      // rejection (EHOSTUNREACH / EHOSTDOWN when a device drops off the LAN).
+      // Without this guard the rejection becomes an uncaught exception and
+      // crashes the daemon. The scheduler still observes real failures via
+      // its own applyFrame().catch() on the next frame.
+      void this.maybeFlush().catch(() => undefined);
     }, Math.max(0, delayMs));
     // Don't keep the event loop alive just for a trailing light update.
     if (typeof (this.flushTimer as { unref?: () => void }).unref === 'function') {
@@ -541,16 +547,30 @@ export class GoveeAdapter implements LightAdapter {
       }
     }
 
+    let anySent = false;
+    let lastErr: unknown = null;
     for (const dev of this.devices) {
-      for (let i = 0; i < packets.length; i++) {
-        await this.sendTo(dev.ip, packets[i]!);
-        if (this.interPacketGapMs > 0 && i < packets.length - 1) {
-          await this.delay(this.interPacketGapMs);
+      try {
+        for (let i = 0; i < packets.length; i++) {
+          await this.sendTo(dev.ip, packets[i]!);
+          if (this.interPacketGapMs > 0 && i < packets.length - 1) {
+            await this.delay(this.interPacketGapMs);
+          }
         }
+        anySent = true;
+      } catch (err) {
+        // A single unreachable device (e.g. one that changed IP or powered
+        // off) must not starve the other devices or bubble up as a crash.
+        // Remember the error and only surface it if EVERY device failed.
+        lastErr = err;
       }
     }
 
     this.lastSentState = { on, r, g, b, brightness };
+
+    if (!anySent && lastErr !== null && this.devices.length > 0) {
+      throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+    }
   }
 
   private sendTo(ip: string, packet: Buffer): Promise<void> {
