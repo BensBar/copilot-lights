@@ -83,4 +83,39 @@ final class DaemonStatusTests: XCTestCase {
         // Back-compat: a session without `origin` decodes to nil, not a throw.
         XCTAssertNil(list.first(where: { $0.id == "s2" })?.origin)
     }
+
+    // MARK: - Emitted-shade matching (widget color == physical light shade)
+
+    /// The physical bulb receives full-saturation rgb + a separate 0–100
+    /// brightness and dims by scaling each channel. `scaled(byBrightness:)`
+    /// mirrors that so the on-screen orb shows the same shade, not the bright
+    /// full-saturation hue.
+    func testScaledByBrightnessDarkensToEmittedShade() throws {
+        let green = try XCTUnwrap(RGBColor.fromHex("#4ade80")) // (74, 222, 128)
+        let dim = green.scaled(byBrightness: 30)
+        XCTAssertEqual(dim.r, 22)  // round(74 * 0.30)
+        XCTAssertEqual(dim.g, 67)  // round(222 * 0.30)
+        XCTAssertEqual(dim.b, 38)  // round(128 * 0.30)
+    }
+
+    func testScaledByBrightnessFullIsUnchanged() throws {
+        let c = RGBColor(r: 255, g: 128, b: 64)
+        let full = c.scaled(byBrightness: 100)
+        XCTAssertEqual(full.r, 255)
+        XCTAssertEqual(full.g, 128)
+        XCTAssertEqual(full.b, 64)
+    }
+
+    func testScaledByBrightnessZeroIsBlackAndClamps() throws {
+        let c = RGBColor(r: 200, g: 200, b: 200)
+        let off = c.scaled(byBrightness: 0)
+        XCTAssertEqual(off.r, 0)
+        XCTAssertEqual(off.g, 0)
+        XCTAssertEqual(off.b, 0)
+        // Out-of-range brightness clamps to [0, 100] rather than over/under-scaling.
+        let overdriven = c.scaled(byBrightness: 150)
+        XCTAssertEqual(overdriven.r, 200)
+        let negative = c.scaled(byBrightness: -20)
+        XCTAssertEqual(negative.r, 0)
+    }
 }

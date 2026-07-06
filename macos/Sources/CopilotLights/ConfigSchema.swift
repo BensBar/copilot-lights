@@ -174,6 +174,22 @@ extension RGBColor {
         guard s.count == 6, let v = Int(s, radix: 16) else { return nil }
         return RGBColor(r: (v >> 16) & 0xff, g: (v >> 8) & 0xff, b: v & 0xff)
     }
+
+    /// The *emitted shade* an RGB bulb produces at a given brightness. Govee
+    /// (and Hue/HA) receive the full-saturation `rgb` plus a separate 0–100
+    /// brightness, and the hardware dims by scaling each channel — so a bulb
+    /// at 30% shows a dark version of the hue, not a bright one. The on-screen
+    /// widget mirrors that by multiplying each channel by brightness/100, so
+    /// the orb's color and shade match the physical light exactly.
+    func scaled(byBrightness brightness: Int) -> RGBColor {
+        let clamped = max(0, min(100, brightness))
+        let factor = Double(clamped) / 100.0
+        return RGBColor(
+            r: Int((Double(r) * factor).rounded()),
+            g: Int((Double(g) * factor).rounded()),
+            b: Int((Double(b) * factor).rounded())
+        )
+    }
 }
 
 extension CopilotLightsConfigDoc {

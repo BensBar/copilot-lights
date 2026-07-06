@@ -8,6 +8,7 @@ import {
   buildColorPacket,
   parseDiscoveryResponse,
   blinkGoveeDevice,
+  enumerateScanTargets,
 } from '../../../src/adapters/govee.js';
 import type { LightFrame } from '../../../src/adapters/adapter.js';
 
@@ -85,6 +86,61 @@ describe('Govee adapter', () => {
           },
         },
       });
+    });
+  });
+
+  describe('enumerateScanTargets', () => {
+    it('emits the broadcast address plus every unicast host, minus own/network/broadcast', () => {
+      const targets = enumerateScanTargets({
+        en0: [
+          {
+            address: '192.168.4.100',
+            netmask: '255.255.255.0',
+            family: 'IPv4',
+            mac: '00:00:00:00:00:00',
+            internal: false,
+            cidr: '192.168.4.100/24',
+          } as any,
+        ],
+      });
+      expect(targets).toContain('192.168.4.255'); // directed broadcast
+      expect(targets).toContain('192.168.4.1'); // first host
+      expect(targets).toContain('192.168.4.254'); // last host
+      expect(targets).not.toContain('192.168.4.0'); // network address
+      expect(targets).not.toContain('192.168.4.100'); // our own address
+      // /24 = 254 hosts, minus our own, plus the broadcast entry.
+      expect(targets.length).toBe(254);
+    });
+
+    it('skips loopback and non-IPv4 interfaces', () => {
+      const targets = enumerateScanTargets({
+        lo0: [
+          { address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4', internal: true, cidr: '127.0.0.1/8' } as any,
+        ],
+        en0: [
+          { address: 'fe80::1', netmask: 'ffff:ffff:ffff:ffff::', family: 'IPv6', internal: false, cidr: 'fe80::1/64' } as any,
+        ],
+      });
+      expect(targets).toEqual([]);
+    });
+
+    it('skips subnets larger than the /24 sweep bound to avoid huge scans', () => {
+      const targets = enumerateScanTargets({
+        en0: [
+          { address: '10.0.0.5', netmask: '255.255.0.0', family: 'IPv4', internal: false, cidr: '10.0.0.5/16' } as any,
+        ],
+      });
+      expect(targets).toEqual([]);
+    });
+
+    it('derives the prefix from the netmask when cidr is absent', () => {
+      const targets = enumerateScanTargets({
+        en0: [
+          { address: '192.168.4.100', netmask: '255.255.255.0', family: 'IPv4', internal: false, cidr: null } as any,
+        ],
+      });
+      expect(targets).toContain('192.168.4.255');
+      expect(targets.length).toBe(254);
     });
   });
 
@@ -277,6 +333,36 @@ describe('Govee adapter', () => {
       setTimeout(() => socket.emit('message', response, { address: '10.0.0.99', port: 4002 } as any), 20);
       const found = await adapter.discover(80);
       expect(found).toEqual([{ ip: '10.0.0.99', sku: 'H6008', mac: 'AA:BB:CC:00:11:22' }]);
+    });
+
+    it('discover() sweeps multicast plus every direct target on port 4001', async () => {
+      adapter = new GoveeAdapter(
+        { devices: [], discoveryTimeoutMs: 0 },
+        {
+          socketFactory: () => socket as any,
+          // Deterministic direct targets so the test doesn't depend on the
+          // host's real network interfaces.
+          scanTargets: ['192.168.4.255', '192.168.4.10', '192.168.4.11'],
+        }
+      );
+      await adapter.connect();
+      socket.sent.length = 0;
+      await adapter.discover(0);
+
+      const scanSends = socket.sent.filter((p) => p.port === 4001);
+      const scanIps = scanSends.map((p) => p.ip);
+      // Multicast group is always probed first...
+      expect(scanIps[0]).toBe('239.255.255.250');
+      // ...then each direct target (broadcast + unicast hosts).
+      expect(scanIps).toEqual(
+        expect.arrayContaining(['239.255.255.250', '192.168.4.255', '192.168.4.10', '192.168.4.11'])
+      );
+      // Every scan packet carries the documented discovery payload.
+      for (const p of scanSends) {
+        expect(JSON.parse(p.msg.toString())).toEqual({
+          msg: { cmd: 'scan', data: { account_topic: 'reserve' } },
+        });
+      }
     });
 
     it('snapshot/restore round-trips the most recent frame', async () => {

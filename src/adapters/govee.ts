@@ -1,4 +1,5 @@
 import * as dgram from 'node:dgram';
+import * as os from 'node:os';
 import type { LightAdapter, LightFrame, LightSnapshot } from './adapter.js';
 import type { z } from 'zod';
 import type { GoveeConfigSchema } from '../config/schema.js';
@@ -61,6 +62,108 @@ export function buildDiscoveryPacket(): Buffer {
     msg: { cmd: 'scan', data: { account_topic: 'reserve' } },
   }));
 }
+
+/** The Govee LAN multicast discovery group. Devices that honor multicast
+ *  reply to a scan sent here; many home networks (Wi-Fi AP isolation, mesh
+ *  backhaul, wired/wireless segment splits) silently drop multicast, so we
+ *  also sweep each local subnet directly — see {@link enumerateScanTargets}. */
+export const GOVEE_MULTICAST_ADDR = '239.255.255.250';
+export const GOVEE_SCAN_PORT = 4001;
+
+/**
+ * Build the list of destination IPs a discovery scan should be sent to, given
+ * a set of local IPv4 interfaces. Returns, per usable interface:
+ *   - the directed subnet broadcast address (e.g. 192.168.4.255), which
+ *     reaches every host on that subnet in one packet where broadcast is
+ *     permitted; and
+ *   - every unicast host address in the subnet (for prefixes >= `minPrefix`,
+ *     default /24 = up to 254 hosts) so devices are still found on networks
+ *     that drop both multicast and broadcast.
+ *
+ * The interface's own address and the network/broadcast addresses are excluded
+ * from the unicast sweep. Results are de-duplicated. Multicast is handled
+ * separately by the caller and is not included here.
+ *
+ * Exported and pure so it can be unit-tested without real sockets.
+ */
+export function enumerateScanTargets(
+  ifaces: NodeJS.Dict<os.NetworkInterfaceInfo[]>,
+  minPrefix = 24,
+): string[] {
+  const targets = new Set<string>();
+  for (const infos of Object.values(ifaces)) {
+    for (const info of infos ?? []) {
+      // node <18 typed `family` as string; runtime may be 'IPv4' or 4.
+      const isV4 = info.family === 'IPv4' || (info.family as unknown as number) === 4;
+      if (!isV4 || info.internal) continue;
+      const prefix = cidrPrefix(info.cidr, info.netmask);
+      if (prefix === null || prefix < minPrefix || prefix > 30) continue;
+
+      const ipNum = ipv4ToInt(info.address);
+      const maskNum = prefixToMask(prefix);
+      if (ipNum === null) continue;
+      const network = (ipNum & maskNum) >>> 0;
+      const broadcast = (network | (~maskNum >>> 0)) >>> 0;
+
+      targets.add(intToIpv4(broadcast));
+      for (let host = network + 1; host < broadcast; host++) {
+        if (host === ipNum) continue; // skip our own address
+        targets.add(intToIpv4(host));
+      }
+    }
+  }
+  return Array.from(targets);
+}
+
+function cidrPrefix(cidr: string | null | undefined, netmask: string | undefined): number | null {
+  if (cidr) {
+    const slash = cidr.lastIndexOf('/');
+    if (slash >= 0) {
+      const p = Number(cidr.slice(slash + 1));
+      if (Number.isInteger(p) && p >= 0 && p <= 32) return p;
+    }
+  }
+  if (netmask) {
+    const m = ipv4ToInt(netmask);
+    if (m !== null) {
+      // Count contiguous leading 1 bits.
+      let p = 0;
+      let seenZero = false;
+      for (let bit = 31; bit >= 0; bit--) {
+        const set = (m >>> bit) & 1;
+        if (set) {
+          if (seenZero) return null; // non-contiguous mask
+          p++;
+        } else {
+          seenZero = true;
+        }
+      }
+      return p;
+    }
+  }
+  return null;
+}
+
+function ipv4ToInt(ip: string): number | null {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const part of parts) {
+    const b = Number(part);
+    if (!Number.isInteger(b) || b < 0 || b > 255) return null;
+    n = ((n << 8) | b) >>> 0;
+  }
+  return n >>> 0;
+}
+
+function intToIpv4(n: number): string {
+  return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+}
+
+function prefixToMask(prefix: number): number {
+  return prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+}
+
 
 export function buildTurnPacket(on: boolean): Buffer {
   return Buffer.from(JSON.stringify({
@@ -183,6 +286,9 @@ export interface GoveeAdapterOptions {
   interPacketGapMs?: number;
   /** Test seam: substitute the inter-packet delay implementation. */
   delay?: (ms: number) => Promise<void>;
+  /** Test seam: override the direct-sweep destination IPs so discovery tests
+   *  don't depend on the host's real network interfaces. */
+  scanTargets?: string[];
 }
 
 /** What we last physically pushed to the device, used to send only the
@@ -206,6 +312,7 @@ export class GoveeAdapter implements LightAdapter {
   private readonly minSendIntervalMs: number;
   private readonly interPacketGapMs: number;
   private readonly delay: (ms: number) => Promise<void>;
+  private readonly scanTargetsOverride: string[] | undefined;
 
   private socket: dgram.Socket | null = null;
   private devices: GoveeDevice[] = [];
@@ -238,6 +345,7 @@ export class GoveeAdapter implements LightAdapter {
     this.minSendIntervalMs = opts?.minSendIntervalMs ?? cfg.minSendIntervalMs ?? 120;
     this.interPacketGapMs = opts?.interPacketGapMs ?? cfg.interPacketGapMs ?? 40;
     this.delay = opts?.delay ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    this.scanTargetsOverride = opts?.scanTargets;
   }
 
 
@@ -303,7 +411,13 @@ export class GoveeAdapter implements LightAdapter {
   }
 
   /** Fire one multicast discovery packet and collect responses for the
-   *  given time window. Resolves with the list of devices that replied. */
+   *  given time window. Resolves with the list of devices that replied.
+   *
+   *  Sends the scan to the Govee multicast group AND directly to each local
+   *  subnet (directed broadcast + a bounded unicast host sweep). Multicast
+   *  alone misses devices on networks with AP isolation, mesh backhaul, or
+   *  wired/wireless segment splits — the direct sweep is what lets a scan
+   *  surface every LAN device instead of only the ones already reachable. */
   async discover(timeoutMs: number): Promise<GoveeDevice[]> {
     if (!this.socket) throw new Error('GoveeAdapter not connected');
     const found = new Map<string, GoveeDevice>();
@@ -314,12 +428,20 @@ export class GoveeAdapter implements LightAdapter {
     this.socket.on('message', onMessage);
     try {
       const packet = buildDiscoveryPacket();
-      await new Promise<void>((resolve, reject) => {
-        this.socket!.send(packet, 4001, '239.255.255.250', (err) => {
-          if (err) reject(err);
-          else resolve();
+      const send = (addr: string): Promise<void> =>
+        new Promise<void>((resolve) => {
+          // Best-effort: a blocked/unroutable target must not abort the sweep.
+          this.socket!.send(packet, GOVEE_SCAN_PORT, addr, () => resolve());
         });
-      });
+
+      // 1) Multicast group (devices that honor it reply immediately).
+      await send(GOVEE_MULTICAST_ADDR);
+      // 2) Direct per-subnet sweep (broadcast + bounded unicast hosts).
+      const targets = this.scanTargets();
+      for (const addr of targets) {
+        await send(addr);
+      }
+
       const deadline = this.now() + Math.max(0, timeoutMs);
       while (this.now() < deadline) {
         await new Promise((r) => setTimeout(r, Math.min(50, deadline - this.now())));
@@ -328,6 +450,17 @@ export class GoveeAdapter implements LightAdapter {
       this.socket.removeListener('message', onMessage);
     }
     return Array.from(found.values());
+  }
+
+  /** Destination IPs for the direct discovery sweep. Overridable via a test
+   *  seam; defaults to enumerating the host's real IPv4 subnets. */
+  private scanTargets(): string[] {
+    if (this.scanTargetsOverride) return this.scanTargetsOverride;
+    try {
+      return enumerateScanTargets(os.networkInterfaces());
+    } catch {
+      return [];
+    }
   }
 
   /**
