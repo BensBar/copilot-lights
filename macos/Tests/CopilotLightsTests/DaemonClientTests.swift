@@ -86,4 +86,48 @@ final class DaemonClientTests: XCTestCase {
         XCTAssertEqual(reply.adapter.lastError, "Connection refused")
         XCTAssertNil(reply.frame)
     }
+
+    // MARK: - Hysteresis (resolveStatus)
+
+    private func okReply(_ state: String, sessions: Int = 1) -> StatusReply {
+        let json = """
+        {"kind":"status","state":"\(state)","sessions":\(sessions),"adapter":{"kind":"mock","ok":true,"lastError":null},"frame":null,"uptimeMs":1}
+        """
+        return try! JSONDecoder().decode(StatusReply.self, from: json.data(using: .utf8)!)
+    }
+
+    func testResolveStatusPublishesOKImmediatelyAndResetsFailures() {
+        let ok = PollResult.ok(okReply("thinking"))
+        let r = DaemonClient.resolveStatus(
+            result: ok, lastGood: .offline, consecutiveFailures: 2, failureTolerance: 3)
+        XCTAssertEqual(r.status, ok)
+        XCTAssertEqual(r.lastGood, ok)
+        XCTAssertEqual(r.consecutiveFailures, 0)
+    }
+
+    func testResolveStatusHoldsLastGoodDuringTransientFailure() {
+        let good = PollResult.ok(okReply("thinking"))
+        // First failure after a good poll: keep showing the good state.
+        let r1 = DaemonClient.resolveStatus(
+            result: .error("timeout"), lastGood: good, consecutiveFailures: 0, failureTolerance: 3)
+        XCTAssertEqual(r1.status, good)
+        XCTAssertEqual(r1.lastGood, good)
+        XCTAssertEqual(r1.consecutiveFailures, 1)
+
+        // Second failure: still within tolerance, still showing good.
+        let r2 = DaemonClient.resolveStatus(
+            result: .offline, lastGood: good, consecutiveFailures: 1, failureTolerance: 3)
+        XCTAssertEqual(r2.status, good)
+        XCTAssertEqual(r2.consecutiveFailures, 2)
+    }
+
+    func testResolveStatusSurfacesFailureAtTolerance() {
+        let good = PollResult.ok(okReply("thinking"))
+        let r = DaemonClient.resolveStatus(
+            result: .offline, lastGood: good, consecutiveFailures: 2, failureTolerance: 3)
+        XCTAssertEqual(r.status, .offline)
+        // lastGood is preserved so recovery re-shows the prior state.
+        XCTAssertEqual(r.lastGood, good)
+        XCTAssertEqual(r.consecutiveFailures, 3)
+    }
 }

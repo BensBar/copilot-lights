@@ -28,13 +28,23 @@ actor DaemonClient {
     private let socketPath: String
     private let pollIntervalMs: UInt64
     private let timeoutMs: UInt64
-    
+
+    /// How many consecutive failed polls we tolerate before actually
+    /// surfacing an offline/error state to the UI. Under heavy agent
+    /// load the daemon's single-threaded loop can occasionally miss the
+    /// poll budget; without this hysteresis a single slow reply would
+    /// flip the widget to gray and back, producing visible flicker.
+    private let failureTolerance: Int
+    private var consecutiveFailures = 0
+    private var lastGood: PollResult = .offline
+
     var statusPublisher: Published<PollResult>.Publisher { $status }
-    
-    init(socketPath: String = SocketPath.resolve(), pollIntervalMs: UInt64 = 250, timeoutMs: UInt64 = 200) {
+
+    init(socketPath: String = SocketPath.resolve(), pollIntervalMs: UInt64 = 250, timeoutMs: UInt64 = 600, failureTolerance: Int = 3) {
         self.socketPath = socketPath
         self.pollIntervalMs = pollIntervalMs
         self.timeoutMs = timeoutMs
+        self.failureTolerance = failureTolerance
     }
     
     func start() {
@@ -71,7 +81,42 @@ actor DaemonClient {
             return firstResult
         }
         
-        status = result
+        // Hysteresis: a successful poll clears the failure streak and is
+        // published immediately. A failure only surfaces to the UI once
+        // we've missed `failureTolerance` polls in a row; until then we
+        // keep showing the last good status so a single slow reply under
+        // load doesn't flicker the widget to gray.
+        let resolved = DaemonClient.resolveStatus(
+            result: result,
+            lastGood: lastGood,
+            consecutiveFailures: consecutiveFailures,
+            failureTolerance: failureTolerance
+        )
+        consecutiveFailures = resolved.consecutiveFailures
+        lastGood = resolved.lastGood
+        status = resolved.status
+    }
+
+    /// Pure hysteresis decision, factored out so it can be unit tested
+    /// without real socket I/O. Given the latest poll `result` and the
+    /// prior `lastGood` / `consecutiveFailures`, returns what the widget
+    /// should display plus the updated bookkeeping.
+    nonisolated static func resolveStatus(
+        result: PollResult,
+        lastGood: PollResult,
+        consecutiveFailures: Int,
+        failureTolerance: Int
+    ) -> (status: PollResult, lastGood: PollResult, consecutiveFailures: Int) {
+        switch result {
+        case .ok:
+            return (result, result, 0)
+        case .offline, .error:
+            let failures = consecutiveFailures + 1
+            if failures >= failureTolerance {
+                return (result, lastGood, failures)
+            }
+            return (lastGood, lastGood, failures)
+        }
     }
     
     private func queryDaemon() async -> PollResult {
@@ -85,11 +130,71 @@ actor DaemonClient {
             // concurrency checker accepts the capture — a plain `var`
             // shared across nonisolated closures is rejected.
             let resumed = ResumedFlag()
-            
+
+            // Send the status query as soon as the socket is ready and
+            // wire up the receive. Previously this was fired after a blind
+            // 50ms sleep, which burned a quarter of the poll budget for no
+            // reason; sending on `.ready` reclaims that time.
+            func sendQuery() {
+                let query = StatusQuery()
+                guard let jsonData = try? JSONEncoder().encode(query),
+                      let jsonString = String(data: jsonData, encoding: .utf8) else {
+                    if resumed.claim() {
+                        continuation.resume(returning: .error("encoding failed"))
+                        connection.cancel()
+                    }
+                    return
+                }
+
+                let message = (jsonString + "\n").data(using: .utf8)!
+
+                connection.send(content: message, completion: .contentProcessed { error in
+                    if let error = error {
+                        if resumed.claim() {
+                            continuation.resume(returning: .error(error.localizedDescription))
+                            connection.cancel()
+                        }
+                        return
+                    }
+
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, error in
+                        defer {
+                            connection.cancel()
+                        }
+
+                        if resumed.claim() {
+                            if let error = error {
+                                continuation.resume(returning: .error(error.localizedDescription))
+                                return
+                            }
+
+                            guard let data = data, let response = String(data: data, encoding: .utf8) else {
+                                continuation.resume(returning: .error("no data"))
+                                return
+                            }
+
+                            let lines = response.split(separator: "\n", omittingEmptySubsequences: true)
+                            guard let firstLine = lines.first else {
+                                continuation.resume(returning: .error("empty response"))
+                                return
+                            }
+
+                            guard let jsonData = String(firstLine).data(using: .utf8),
+                                  let statusReply = try? JSONDecoder().decode(StatusReply.self, from: jsonData) else {
+                                continuation.resume(returning: .error("parse failed"))
+                                return
+                            }
+
+                            continuation.resume(returning: .ok(statusReply))
+                        }
+                    }
+                })
+            }
+
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    break
+                    sendQuery()
                 case .failed(let error):
                     if resumed.claim() {
                         if case .posix(let code) = error, code == .ENOENT || code == .ECONNREFUSED {
@@ -107,68 +212,8 @@ actor DaemonClient {
                     break
                 }
             }
-            
+
             connection.start(queue: .global())
-            
-            Task {
-                try? await Task.sleep(for: .milliseconds(50))
-                
-                guard !resumed.isClaimed else { return }
-                
-                let query = StatusQuery()
-                guard let jsonData = try? JSONEncoder().encode(query),
-                      let jsonString = String(data: jsonData, encoding: .utf8) else {
-                    if resumed.claim() {
-                        continuation.resume(returning: .error("encoding failed"))
-                        connection.cancel()
-                    }
-                    return
-                }
-                
-                let message = (jsonString + "\n").data(using: .utf8)!
-                
-                connection.send(content: message, completion: .contentProcessed { error in
-                    if let error = error {
-                        if resumed.claim() {
-                            continuation.resume(returning: .error(error.localizedDescription))
-                            connection.cancel()
-                        }
-                        return
-                    }
-                    
-                    connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
-                        defer {
-                            connection.cancel()
-                        }
-                        
-                        if resumed.claim() {
-                            if let error = error {
-                                continuation.resume(returning: .error(error.localizedDescription))
-                                return
-                            }
-                            
-                            guard let data = data, let response = String(data: data, encoding: .utf8) else {
-                                continuation.resume(returning: .error("no data"))
-                                return
-                            }
-                            
-                            let lines = response.split(separator: "\n", omittingEmptySubsequences: true)
-                            guard let firstLine = lines.first else {
-                                continuation.resume(returning: .error("empty response"))
-                                return
-                            }
-                            
-                            guard let jsonData = String(firstLine).data(using: .utf8),
-                                  let statusReply = try? JSONDecoder().decode(StatusReply.self, from: jsonData) else {
-                                continuation.resume(returning: .error("parse failed"))
-                                return
-                            }
-                            
-                            continuation.resume(returning: .ok(statusReply))
-                        }
-                    }
-                })
-            }
         }
     }
 }
