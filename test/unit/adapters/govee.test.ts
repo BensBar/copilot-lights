@@ -8,7 +8,6 @@ import {
   buildColorPacket,
   parseDiscoveryResponse,
   blinkGoveeDevice,
-  enumerateScanTargets,
 } from '../../../src/adapters/govee.js';
 import type { LightFrame } from '../../../src/adapters/adapter.js';
 
@@ -89,61 +88,6 @@ describe('Govee adapter', () => {
     });
   });
 
-  describe('enumerateScanTargets', () => {
-    it('emits the broadcast address plus every unicast host, minus own/network/broadcast', () => {
-      const targets = enumerateScanTargets({
-        en0: [
-          {
-            address: '192.168.4.100',
-            netmask: '255.255.255.0',
-            family: 'IPv4',
-            mac: '00:00:00:00:00:00',
-            internal: false,
-            cidr: '192.168.4.100/24',
-          } as any,
-        ],
-      });
-      expect(targets).toContain('192.168.4.255'); // directed broadcast
-      expect(targets).toContain('192.168.4.1'); // first host
-      expect(targets).toContain('192.168.4.254'); // last host
-      expect(targets).not.toContain('192.168.4.0'); // network address
-      expect(targets).not.toContain('192.168.4.100'); // our own address
-      // /24 = 254 hosts, minus our own, plus the broadcast entry.
-      expect(targets.length).toBe(254);
-    });
-
-    it('skips loopback and non-IPv4 interfaces', () => {
-      const targets = enumerateScanTargets({
-        lo0: [
-          { address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4', internal: true, cidr: '127.0.0.1/8' } as any,
-        ],
-        en0: [
-          { address: 'fe80::1', netmask: 'ffff:ffff:ffff:ffff::', family: 'IPv6', internal: false, cidr: 'fe80::1/64' } as any,
-        ],
-      });
-      expect(targets).toEqual([]);
-    });
-
-    it('skips subnets larger than the /24 sweep bound to avoid huge scans', () => {
-      const targets = enumerateScanTargets({
-        en0: [
-          { address: '10.0.0.5', netmask: '255.255.0.0', family: 'IPv4', internal: false, cidr: '10.0.0.5/16' } as any,
-        ],
-      });
-      expect(targets).toEqual([]);
-    });
-
-    it('derives the prefix from the netmask when cidr is absent', () => {
-      const targets = enumerateScanTargets({
-        en0: [
-          { address: '192.168.4.100', netmask: '255.255.255.0', family: 'IPv4', internal: false, cidr: null } as any,
-        ],
-      });
-      expect(targets).toContain('192.168.4.255');
-      expect(targets.length).toBe(254);
-    });
-  });
-
   describe('parseDiscoveryResponse', () => {
     it('extracts ip/sku/mac from a well-formed reply', () => {
       const buf = Buffer.from(JSON.stringify({
@@ -218,6 +162,103 @@ describe('Govee adapter', () => {
       expect(third.msg.cmd).toBe('brightness');
       // Fourth wraps around to second device.
       expect(socket.sent[3]!.ip).toBe('10.0.0.6');
+    });
+
+    it('one unreachable device does not starve the others or throw', async () => {
+      // Socket that rejects any send to the "dead" IP with EHOSTUNREACH,
+      // exactly like a Govee device that powered off or changed IP.
+      class PartialFailSocket extends FakeSocket {
+        deadIp = '10.0.0.5';
+        override send(
+          msg: Buffer,
+          port: number,
+          ip: string,
+          cb?: (err: Error | null) => void
+        ): void {
+          if (ip === this.deadIp) {
+            if (cb) setImmediate(() => cb(new Error('send EHOSTUNREACH 10.0.0.5:4003')));
+            return;
+          }
+          this.sent.push({ msg: Buffer.from(msg), port, ip });
+          if (cb) setImmediate(() => cb(null));
+        }
+      }
+      const s = new PartialFailSocket();
+      adapter = new GoveeAdapter(
+        { devices: [{ ip: '10.0.0.5' }, { ip: '10.0.0.6' }], discoveryTimeoutMs: 0 },
+        { socketFactory: () => s as any, minSendIntervalMs: 0, interPacketGapMs: 0 }
+      );
+      await adapter.connect();
+
+      // Must not reject even though the first device is unreachable.
+      await expect(
+        adapter.applyFrame({ rgb: { r: 255, g: 0, b: 128 }, brightness: 60 })
+      ).resolves.toBeUndefined();
+
+      // The healthy device still received all three packets.
+      expect(s.sent).toHaveLength(3);
+      expect(s.sent.every((p) => p.ip === '10.0.0.6')).toBe(true);
+    });
+
+    it('applyFrame rejects only when every device is unreachable', async () => {
+      class AllFailSocket extends FakeSocket {
+        override send(
+          _msg: Buffer,
+          _port: number,
+          _ip: string,
+          cb?: (err: Error | null) => void
+        ): void {
+          if (cb) setImmediate(() => cb(new Error('send EHOSTUNREACH')));
+        }
+      }
+      const s = new AllFailSocket();
+      adapter = new GoveeAdapter(
+        { devices: [{ ip: '10.0.0.5' }], discoveryTimeoutMs: 0 },
+        { socketFactory: () => s as any, minSendIntervalMs: 0, interPacketGapMs: 0 }
+      );
+      await adapter.connect();
+      await expect(
+        adapter.applyFrame({ rgb: { r: 1, g: 2, b: 3 }, brightness: 50 })
+      ).rejects.toThrow(/EHOSTUNREACH/);
+    });
+
+    it('trailing flush to an unreachable device does not raise unhandledRejection', async () => {
+      // Regression: the scheduleFlush() timer fires outside any applyFrame()
+      // call chain, so a UDP send rejection there must be swallowed or it
+      // crashes the daemon with an uncaught exception.
+      class DeadSocket extends FakeSocket {
+        override send(
+          _msg: Buffer,
+          _port: number,
+          _ip: string,
+          cb?: (err: Error | null) => void
+        ): void {
+          if (cb) setImmediate(() => cb(new Error('send EHOSTDOWN')));
+        }
+      }
+      const s = new DeadSocket();
+      adapter = new GoveeAdapter(
+        { devices: [{ ip: '10.0.0.5' }], discoveryTimeoutMs: 0 },
+        { socketFactory: () => s as any, minSendIntervalMs: 50, interPacketGapMs: 0 }
+      );
+      await adapter.connect();
+
+      let unhandled: unknown = null;
+      const onUnhandled = (err: unknown): void => {
+        unhandled = err;
+      };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        // First send happens immediately (and rejects — caught by the caller).
+        await adapter.applyFrame({ rgb: { r: 1, g: 2, b: 3 }, brightness: 50 }).catch(() => undefined);
+        // A second frame within the throttle window arms the trailing flush.
+        await adapter.applyFrame({ rgb: { r: 4, g: 5, b: 6 }, brightness: 60 }).catch(() => undefined);
+        // Let the trailing-flush timer fire and its rejection settle.
+        await new Promise((r) => setTimeout(r, 80));
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled);
+      }
+      expect(unhandled).toBeNull();
     });
 
     it('applyFrame with brightness 0 only sends turn-off (no color/brightness)', async () => {
@@ -333,36 +374,6 @@ describe('Govee adapter', () => {
       setTimeout(() => socket.emit('message', response, { address: '10.0.0.99', port: 4002 } as any), 20);
       const found = await adapter.discover(80);
       expect(found).toEqual([{ ip: '10.0.0.99', sku: 'H6008', mac: 'AA:BB:CC:00:11:22' }]);
-    });
-
-    it('discover() sweeps multicast plus every direct target on port 4001', async () => {
-      adapter = new GoveeAdapter(
-        { devices: [], discoveryTimeoutMs: 0 },
-        {
-          socketFactory: () => socket as any,
-          // Deterministic direct targets so the test doesn't depend on the
-          // host's real network interfaces.
-          scanTargets: ['192.168.4.255', '192.168.4.10', '192.168.4.11'],
-        }
-      );
-      await adapter.connect();
-      socket.sent.length = 0;
-      await adapter.discover(0);
-
-      const scanSends = socket.sent.filter((p) => p.port === 4001);
-      const scanIps = scanSends.map((p) => p.ip);
-      // Multicast group is always probed first...
-      expect(scanIps[0]).toBe('239.255.255.250');
-      // ...then each direct target (broadcast + unicast hosts).
-      expect(scanIps).toEqual(
-        expect.arrayContaining(['239.255.255.250', '192.168.4.255', '192.168.4.10', '192.168.4.11'])
-      );
-      // Every scan packet carries the documented discovery payload.
-      for (const p of scanSends) {
-        expect(JSON.parse(p.msg.toString())).toEqual({
-          msg: { cmd: 'scan', data: { account_topic: 'reserve' } },
-        });
-      }
     });
 
     it('snapshot/restore round-trips the most recent frame', async () => {
