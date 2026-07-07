@@ -26,14 +26,20 @@ actor DaemonClient {
     
     private var pollTask: Task<Void, Never>?
     private let socketPath: String
+    /// Backoff between reconnect attempts after the subscribe connection
+    /// closes. (Named `pollIntervalMs` for source/init compatibility with
+    /// the previous polling client.)
     private let pollIntervalMs: UInt64
+    /// Guard for how long we wait for the connection to reach `.ready`
+    /// before treating the attempt as a failure and reconnecting.
     private let timeoutMs: UInt64
 
-    /// How many consecutive failed polls we tolerate before actually
-    /// surfacing an offline/error state to the UI. Under heavy agent
-    /// load the daemon's single-threaded loop can occasionally miss the
-    /// poll budget; without this hysteresis a single slow reply would
-    /// flip the widget to gray and back, producing visible flicker.
+    /// How many consecutive failed connection attempts we tolerate before
+    /// actually surfacing an offline/error state to the UI. A single
+    /// transient socket close (e.g. the daemon briefly stalling under
+    /// heavy agent load) reconnects within `pollIntervalMs` and delivers a
+    /// fresh snapshot frame, so without this hysteresis it would flip the
+    /// widget to gray and back, producing visible flicker.
     private let failureTolerance: Int
     private var consecutiveFailures = 0
     private var lastGood: PollResult = .offline
@@ -49,43 +55,35 @@ actor DaemonClient {
     
     func start() {
         pollTask?.cancel()
-        pollTask = Task {
-            while !Task.isCancelled {
-                await poll()
-                try? await Task.sleep(for: .milliseconds(pollIntervalMs))
-            }
-        }
+        pollTask = Task { await self.runSubscription() }
     }
     
     func stop() {
         pollTask?.cancel()
         pollTask = nil
     }
-    
-    private func poll() async {
-        let result = await withTaskGroup(of: PollResult.self) { group -> PollResult in
-            group.addTask {
-                await self.queryDaemon()
+
+    /// Maintain a single long-lived subscribe connection. While it is open
+    /// the daemon pushes a full status frame on every transition, which we
+    /// publish immediately. When the connection closes we apply the
+    /// failure hysteresis and reconnect after a short backoff, so a
+    /// transient blip never reaches the UI but a truly-down daemon
+    /// eventually surfaces offline.
+    private func runSubscription() async {
+        while !Task.isCancelled {
+            for await result in openSubscription() {
+                applyResult(result)
             }
-            
-            group.addTask {
-                try? await Task.sleep(for: .milliseconds(self.timeoutMs))
-                return .error("timeout")
-            }
-            
-            guard let firstResult = await group.next() else {
-                return .error("no result")
-            }
-            
-            group.cancelAll()
-            return firstResult
+            if Task.isCancelled { break }
+            try? await Task.sleep(for: .milliseconds(pollIntervalMs))
         }
-        
-        // Hysteresis: a successful poll clears the failure streak and is
-        // published immediately. A failure only surfaces to the UI once
-        // we've missed `failureTolerance` polls in a row; until then we
-        // keep showing the last good status so a single slow reply under
-        // load doesn't flicker the widget to gray.
+    }
+
+    /// Publish a single stream element, running it through the shared
+    /// hysteresis so a live frame resets the failure streak and a terminal
+    /// close only surfaces offline after `failureTolerance` failed
+    /// reconnects.
+    private func applyResult(_ result: PollResult) {
         let resolved = DaemonClient.resolveStatus(
             result: result,
             lastGood: lastGood,
@@ -129,96 +127,103 @@ actor DaemonClient {
         return String(data: lineData, encoding: .utf8)
     }
 
-    private func queryDaemon() async -> PollResult {
-        let connection = NWConnection(to: .unix(path: socketPath), using: .tcp)
-        
-        return await withCheckedContinuation { continuation in
-            // `resumed` is read and written from multiple concurrent
-            // closures (NWConnection's state/receive/send handlers run
-            // on internal queues; the Task ran below runs separately).
-            // Wrap it in a tiny thread-safe holder so Swift's strict-
-            // concurrency checker accepts the capture — a plain `var`
-            // shared across nonisolated closures is rejected.
-            let resumed = ResumedFlag()
+    /// Pure helper: split an accumulated buffer into every complete
+    /// newline-terminated line plus the leftover partial remainder. A
+    /// subscribe connection delivers many frames over its lifetime, and a
+    /// single read can carry several complete frames and/or a partial
+    /// trailing frame, so the streaming client must drain them all and
+    /// retain the remainder for the next read. Factored out so this can be
+    /// unit tested without a live socket.
+    nonisolated static func splitCompleteLines(in data: Data) -> (lines: [String], remainder: Data) {
+        var lines: [String] = []
+        var lineStart = data.startIndex
+        var index = data.startIndex
+        while index < data.endIndex {
+            if data[index] == 0x0A {
+                let lineData = data[lineStart..<index]
+                if let line = String(data: lineData, encoding: .utf8) {
+                    lines.append(line)
+                }
+                lineStart = data.index(after: index)
+            }
+            index = data.index(after: index)
+        }
+        return (lines, Data(data[lineStart..<data.endIndex]))
+    }
 
-            // Send the status query as soon as the socket is ready and
-            // wire up the receive. Previously this was fired after a blind
-            // 50ms sleep, which burned a quarter of the poll budget for no
-            // reason; sending on `.ready` reclaims that time.
-            func sendQuery() {
-                let query = StatusQuery()
-                guard let jsonData = try? JSONEncoder().encode(query),
-                      let jsonString = String(data: jsonData, encoding: .utf8) else {
-                    if resumed.claim() {
-                        continuation.resume(returning: .error("encoding failed"))
-                        connection.cancel()
+    private func openSubscription() -> AsyncStream<PollResult> {
+        let socketPath = self.socketPath
+        let timeoutMs = self.timeoutMs
+
+        return AsyncStream { continuation in
+            let connection = NWConnection(to: .unix(path: socketPath), using: .tcp)
+            let buffer = LineBuffer()
+            // Ensures we yield exactly one terminal element and finish the
+            // stream once, no matter which handler (state / receive) races
+            // to observe the close first.
+            let finished = ResumedFlag()
+
+            @Sendable func finish(_ terminal: PollResult) {
+                if finished.claim() {
+                    continuation.yield(terminal)
+                    continuation.finish()
+                    connection.cancel()
+                }
+            }
+
+            // Drain and publish every complete newline-terminated frame the
+            // daemon has pushed. A subscribe connection delivers many frames
+            // over its lifetime (one per state transition), and multiple
+            // frames — or a partial trailing frame — can arrive in a single
+            // read, so we split on every newline rather than just the first.
+            @Sendable func drainFrames() {
+                for line in buffer.takeAllCompleteLines() {
+                    guard let jsonData = line.data(using: .utf8),
+                          let reply = try? JSONDecoder().decode(StatusReply.self, from: jsonData) else {
+                        // Ignore unparseable/blank lines; a genuinely partial
+                        // frame stays buffered until its newline arrives.
+                        continue
                     }
+                    continuation.yield(.ok(reply))
+                }
+            }
+
+            @Sendable func receiveLoop() {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
+                    if let error = error {
+                        finish(.error(error.localizedDescription))
+                        return
+                    }
+
+                    if let data = data, !data.isEmpty {
+                        buffer.append(data)
+                        drainFrames()
+                    }
+
+                    if isComplete {
+                        // Peer closed the connection — treat as a transient
+                        // offline; the reconnect loop will re-establish it.
+                        finish(.offline)
+                        return
+                    }
+
+                    receiveLoop()
+                }
+            }
+
+            func sendSubscribe() {
+                guard let jsonData = try? JSONEncoder().encode(SubscribeQuery()),
+                      let jsonString = String(data: jsonData, encoding: .utf8) else {
+                    finish(.error("encoding failed"))
                     return
                 }
 
                 let message = (jsonString + "\n").data(using: .utf8)!
-
                 connection.send(content: message, completion: .contentProcessed { error in
                     if let error = error {
-                        if resumed.claim() {
-                            continuation.resume(returning: .error(error.localizedDescription))
-                            connection.cancel()
-                        }
+                        finish(.error(error.localizedDescription))
                         return
                     }
-
-                    // The status payload grows with the number of active
-                    // sessions and now routinely exceeds 2 KB, so it can be
-                    // split across multiple TCP segments. A single receive
-                    // with minimumIncompleteLength: 1 frequently returns only
-                    // a fragment; parsing that fragment fails and — under
-                    // steady load where every payload fragments the same way —
-                    // exhausts the failure hysteresis and flips the widget to
-                    // gray. Accumulate chunks until we have a complete
-                    // newline-terminated line before parsing.
-                    let buffer = LineBuffer()
-
-                    func receiveLoop() {
-                        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
-                            if let error = error {
-                                if resumed.claim() {
-                                    continuation.resume(returning: .error(error.localizedDescription))
-                                    connection.cancel()
-                                }
-                                return
-                            }
-
-                            if let data = data, !data.isEmpty {
-                                buffer.append(data)
-                            }
-
-                            if let line = buffer.firstCompleteLine() {
-                                if resumed.claim() {
-                                    if let jsonData = line.data(using: .utf8),
-                                       let statusReply = try? JSONDecoder().decode(StatusReply.self, from: jsonData) {
-                                        continuation.resume(returning: .ok(statusReply))
-                                    } else {
-                                        continuation.resume(returning: .error("parse failed"))
-                                    }
-                                    connection.cancel()
-                                }
-                                return
-                            }
-
-                            if isComplete {
-                                if resumed.claim() {
-                                    continuation.resume(returning: .error("incomplete response"))
-                                    connection.cancel()
-                                }
-                                return
-                            }
-
-                            // No complete line yet and the peer hasn't closed;
-                            // keep reading until the newline arrives.
-                            receiveLoop()
-                        }
-                    }
-
                     receiveLoop()
                 })
             }
@@ -226,23 +231,33 @@ actor DaemonClient {
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    sendQuery()
+                    sendSubscribe()
                 case .failed(let error):
-                    if resumed.claim() {
-                        if case .posix(let code) = error, code == .ENOENT || code == .ECONNREFUSED {
-                            continuation.resume(returning: .offline)
-                        } else {
-                            continuation.resume(returning: .error(error.localizedDescription))
-                        }
-                        connection.cancel()
+                    if case .posix(let code) = error, code == .ENOENT || code == .ECONNREFUSED {
+                        finish(.offline)
+                    } else {
+                        finish(.error(error.localizedDescription))
                     }
                 case .cancelled:
-                    if resumed.claim() {
-                        continuation.resume(returning: .offline)
-                    }
+                    finish(.offline)
                 default:
                     break
                 }
+            }
+
+            // Guard against a connection that never reaches `.ready` (e.g. the
+            // socket file exists but nothing is accepting). Give it a bounded
+            // window, then treat the attempt as offline so the reconnect loop
+            // can retry.
+            let readyDeadline = DispatchTime.now() + .milliseconds(Int(timeoutMs))
+            DispatchQueue.global().asyncAfter(deadline: readyDeadline) {
+                if connection.state != .ready {
+                    finish(.offline)
+                }
+            }
+
+            continuation.onTermination = { _ in
+                connection.cancel()
             }
 
             connection.start(queue: .global())
@@ -289,10 +304,14 @@ private final class LineBuffer: @unchecked Sendable {
         data.append(chunk)
     }
 
-    /// Returns the first newline-terminated line accumulated so far, or
-    /// nil if no complete line has arrived yet.
-    func firstCompleteLine() -> String? {
+    /// Removes and returns all complete newline-terminated lines, dropping
+    /// them (and their newlines) from the buffer while retaining any
+    /// partial trailing frame. Used by the subscribe stream to drain every
+    /// pushed frame that has arrived so far.
+    func takeAllCompleteLines() -> [String] {
         lock.lock(); defer { lock.unlock() }
-        return DaemonClient.firstCompleteLine(in: data)
+        let (lines, remainder) = DaemonClient.splitCompleteLines(in: data)
+        data = remainder
+        return lines
     }
 }

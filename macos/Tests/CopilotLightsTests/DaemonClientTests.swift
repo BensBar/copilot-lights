@@ -163,4 +163,44 @@ final class DaemonClientTests: XCTestCase {
         acc.append(Data("\n".utf8))
         XCTAssertEqual(DaemonClient.firstCompleteLine(in: acc), "{\"kind\":\"status\"}")
     }
+
+    // MARK: - Streaming frame splitter (subscribe channel)
+
+    func testSplitCompleteLinesDrainsMultipleFrames() {
+        // A single read can carry several complete pushed frames.
+        let data = Data("frame-a\nframe-b\nframe-c\n".utf8)
+        let (lines, remainder) = DaemonClient.splitCompleteLines(in: data)
+        XCTAssertEqual(lines, ["frame-a", "frame-b", "frame-c"])
+        XCTAssertTrue(remainder.isEmpty)
+    }
+
+    func testSplitCompleteLinesRetainsPartialTrailingFrame() {
+        // Complete frames are drained; the partial trailing frame is kept
+        // for the next read.
+        let data = Data("frame-a\nframe-b\npartial".utf8)
+        let (lines, remainder) = DaemonClient.splitCompleteLines(in: data)
+        XCTAssertEqual(lines, ["frame-a", "frame-b"])
+        XCTAssertEqual(String(data: remainder, encoding: .utf8), "partial")
+    }
+
+    func testSplitCompleteLinesReturnsNoLinesForPartialOnly() {
+        let data = Data("{\"kind\":\"stat".utf8)
+        let (lines, remainder) = DaemonClient.splitCompleteLines(in: data)
+        XCTAssertTrue(lines.isEmpty)
+        XCTAssertEqual(String(data: remainder, encoding: .utf8), "{\"kind\":\"stat")
+    }
+
+    func testSplitCompleteLinesReassemblesFrameSplitAcrossReads() {
+        // A frame split across two reads is only emitted once its newline
+        // arrives; the remainder carries the head of the next frame.
+        var acc = Data("{\"a\":1".utf8)
+        var (lines, remainder) = DaemonClient.splitCompleteLines(in: acc)
+        XCTAssertTrue(lines.isEmpty)
+
+        acc = remainder
+        acc.append(Data("}\n{\"b\":2".utf8))
+        (lines, remainder) = DaemonClient.splitCompleteLines(in: acc)
+        XCTAssertEqual(lines, ["{\"a\":1}"])
+        XCTAssertEqual(String(data: remainder, encoding: .utf8), "{\"b\":2")
+    }
 }
