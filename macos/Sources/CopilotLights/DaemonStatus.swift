@@ -136,3 +136,13 @@ struct StatusQuery: Codable {
     let kind: String = "query"
     let query: String = "status"
 }
+
+/// Opens the daemon's persistent push channel. Unlike `StatusQuery` (a
+/// one-shot request/reply that closes after a single status frame), a
+/// subscribe connection stays open and receives a full status frame on
+/// every state transition. This eliminates the per-poll connect/close
+/// churn that occasionally raced the daemon's idle timeout and surfaced a
+/// spurious "daemon offline" flash while agents were actively working.
+struct SubscribeQuery: Codable {
+    let kind: String = "subscribe"
+}
