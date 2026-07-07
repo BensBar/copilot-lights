@@ -130,4 +130,37 @@ final class DaemonClientTests: XCTestCase {
         XCTAssertEqual(r.lastGood, good)
         XCTAssertEqual(r.consecutiveFailures, 3)
     }
+
+    // MARK: - Multi-segment reassembly
+
+    func testFirstCompleteLineReturnsNilWithoutNewline() {
+        // A partial payload (no newline yet) must not be parsed — this is
+        // the exact case that used to fail as "parse failed" and flicker
+        // the widget gray under load.
+        let partial = Data("{\"kind\":\"status\",\"state\":\"think".utf8)
+        XCTAssertNil(DaemonClient.firstCompleteLine(in: partial))
+    }
+
+    func testFirstCompleteLineReturnsLineWhenNewlinePresent() {
+        let full = Data("{\"kind\":\"status\"}\n".utf8)
+        XCTAssertEqual(DaemonClient.firstCompleteLine(in: full), "{\"kind\":\"status\"}")
+    }
+
+    func testFirstCompleteLineStopsAtFirstNewline() {
+        let two = Data("first\nsecond\n".utf8)
+        XCTAssertEqual(DaemonClient.firstCompleteLine(in: two), "first")
+    }
+
+    func testFirstCompleteLineReassemblesFragments() {
+        // Simulate the payload arriving in three TCP segments; only after
+        // the final chunk (carrying the newline) do we get a complete line.
+        let buffer = Data()
+        var acc = buffer
+        acc.append(Data("{\"kind\":".utf8))
+        XCTAssertNil(DaemonClient.firstCompleteLine(in: acc))
+        acc.append(Data("\"status\"}".utf8))
+        XCTAssertNil(DaemonClient.firstCompleteLine(in: acc))
+        acc.append(Data("\n".utf8))
+        XCTAssertEqual(DaemonClient.firstCompleteLine(in: acc), "{\"kind\":\"status\"}")
+    }
 }

@@ -119,6 +119,16 @@ actor DaemonClient {
         }
     }
     
+    /// Pure helper: given an accumulated byte buffer, return the first
+    /// complete newline-terminated line as a String, or nil if the buffer
+    /// does not yet contain a newline. Factored out so the multi-segment
+    /// reassembly can be unit tested without a live socket.
+    nonisolated static func firstCompleteLine(in data: Data) -> String? {
+        guard let newlineIndex = data.firstIndex(of: 0x0A) else { return nil }
+        let lineData = data[data.startIndex..<newlineIndex]
+        return String(data: lineData, encoding: .utf8)
+    }
+
     private func queryDaemon() async -> PollResult {
         let connection = NWConnection(to: .unix(path: socketPath), using: .tcp)
         
@@ -157,37 +167,59 @@ actor DaemonClient {
                         return
                     }
 
-                    connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, error in
-                        defer {
-                            connection.cancel()
-                        }
+                    // The status payload grows with the number of active
+                    // sessions and now routinely exceeds 2 KB, so it can be
+                    // split across multiple TCP segments. A single receive
+                    // with minimumIncompleteLength: 1 frequently returns only
+                    // a fragment; parsing that fragment fails and — under
+                    // steady load where every payload fragments the same way —
+                    // exhausts the failure hysteresis and flips the widget to
+                    // gray. Accumulate chunks until we have a complete
+                    // newline-terminated line before parsing.
+                    let buffer = LineBuffer()
 
-                        if resumed.claim() {
+                    func receiveLoop() {
+                        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
                             if let error = error {
-                                continuation.resume(returning: .error(error.localizedDescription))
+                                if resumed.claim() {
+                                    continuation.resume(returning: .error(error.localizedDescription))
+                                    connection.cancel()
+                                }
                                 return
                             }
 
-                            guard let data = data, let response = String(data: data, encoding: .utf8) else {
-                                continuation.resume(returning: .error("no data"))
+                            if let data = data, !data.isEmpty {
+                                buffer.append(data)
+                            }
+
+                            if let line = buffer.firstCompleteLine() {
+                                if resumed.claim() {
+                                    if let jsonData = line.data(using: .utf8),
+                                       let statusReply = try? JSONDecoder().decode(StatusReply.self, from: jsonData) {
+                                        continuation.resume(returning: .ok(statusReply))
+                                    } else {
+                                        continuation.resume(returning: .error("parse failed"))
+                                    }
+                                    connection.cancel()
+                                }
                                 return
                             }
 
-                            let lines = response.split(separator: "\n", omittingEmptySubsequences: true)
-                            guard let firstLine = lines.first else {
-                                continuation.resume(returning: .error("empty response"))
+                            if isComplete {
+                                if resumed.claim() {
+                                    continuation.resume(returning: .error("incomplete response"))
+                                    connection.cancel()
+                                }
                                 return
                             }
 
-                            guard let jsonData = String(firstLine).data(using: .utf8),
-                                  let statusReply = try? JSONDecoder().decode(StatusReply.self, from: jsonData) else {
-                                continuation.resume(returning: .error("parse failed"))
-                                return
-                            }
-
-                            continuation.resume(returning: .ok(statusReply))
+                            // No complete line yet and the peer hasn't closed;
+                            // keep reading until the newline arrives.
+                            receiveLoop()
                         }
                     }
+
+                    receiveLoop()
                 })
             }
 
@@ -241,5 +273,26 @@ private final class ResumedFlag: @unchecked Sendable {
     var isClaimed: Bool {
         lock.lock(); defer { lock.unlock() }
         return value
+    }
+}
+
+/// Thread-safe accumulator for bytes received across multiple NWConnection
+/// `receive` callbacks. The status reply can span several TCP segments, so
+/// we append each chunk and check whether a complete newline-terminated
+/// line has arrived yet.
+private final class LineBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock(); defer { lock.unlock() }
+        data.append(chunk)
+    }
+
+    /// Returns the first newline-terminated line accumulated so far, or
+    /// nil if no complete line has arrived yet.
+    func firstCompleteLine() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return DaemonClient.firstCompleteLine(in: data)
     }
 }
