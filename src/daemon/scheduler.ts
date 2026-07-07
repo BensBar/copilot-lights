@@ -22,6 +22,17 @@ export interface SchedulerOptions {
    * window expires. Set to 0 to disable. Default 3000ms.
    */
   doneCoalesceMs?: number;
+  /**
+   * "Keepalive re-send interval": steady-effect states (ready/thinking/
+   * awaiting_input/done) normally emit exactly one frame on state change
+   * and then coalesce every subsequent tick. With a fire-and-forget UDP
+   * adapter (e.g. Govee LAN) a single dropped packet would then freeze
+   * the lamp on a stale colour until the next state change, while the
+   * widget (reliable socket poll) shows the true state. Re-emitting the
+   * current steady frame every `keepaliveMs` lets a dropped packet
+   * self-heal on the next re-send. Set to 0 to disable. Default 5000ms.
+   */
+  keepaliveMs?: number;
 }
 
 /**
@@ -39,6 +50,7 @@ export class Scheduler {
   private readonly now: () => number;
   private readonly onError: (err: unknown) => void;
   private readonly doneCoalesceMs: number;
+  private readonly keepaliveMs: number;
 
   private state: LightState = 'off';
   private stateChangedAt: number = 0;
@@ -61,6 +73,7 @@ export class Scheduler {
 
   private lastEmittedFrame: LightFrame | null = null;
   private lastEmittedState: LightState = 'off';
+  private lastEmittedAt: number = 0;
   private transitionPending: boolean = false;
 
   constructor(adapter: LightAdapter, cfg: CopilotLightsConfig, opts?: SchedulerOptions) {
@@ -70,6 +83,7 @@ export class Scheduler {
     this.now = opts?.now ?? (() => Date.now());
     this.onError = opts?.onError ?? ((err) => console.warn('Scheduler adapter error:', err));
     this.doneCoalesceMs = opts?.doneCoalesceMs ?? 3000;
+    this.keepaliveMs = opts?.keepaliveMs ?? 5000;
   }
 
   /** Begin emitting frames. Idempotent. */
@@ -98,6 +112,7 @@ export class Scheduler {
     // Clear emission tracking so a restart will emit fresh frames
     this.lastEmittedFrame = null;
     this.lastEmittedState = 'off';
+    this.lastEmittedAt = 0;
     this.transitionPending = false;
   }
 
@@ -286,19 +301,27 @@ export class Scheduler {
       return;
     }
 
-    // For steady effect, coalesce: only emit on state change
+    // For steady effect, coalesce: only emit on state change — but still
+    // re-emit periodically (keepaliveMs) so a dropped fire-and-forget
+    // frame self-heals instead of freezing the lamp on a stale colour.
     if (this.state !== 'off') {
       const style = resolveStateStyle(this.state, this.cfg);
       if (style.effect === 'steady') {
-        // If we already emitted a frame for this steady state, skip
+        // If we already emitted a frame for this steady state, skip —
+        // unless the keepalive interval has elapsed since the last emit.
         if (this.lastEmittedState === this.state && this.lastEmittedFrame !== null) {
-          return;
+          const keepaliveDue =
+            this.keepaliveMs > 0 && timestamp - this.lastEmittedAt >= this.keepaliveMs;
+          if (!keepaliveDue) {
+            return;
+          }
         }
       }
     }
 
     this.lastEmittedFrame = frame;
     this.lastEmittedState = this.state;
+    this.lastEmittedAt = timestamp;
 
     // Fire and forget with error handling
     const pendingTransition = this.transitionPending;

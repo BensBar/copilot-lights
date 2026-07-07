@@ -349,6 +349,66 @@ describe('Scheduler', () => {
     });
   });
 
+  describe('steady keepalive re-send', () => {
+    // Same manual-advance harness as done-coalescing: tick() reads now()
+    // directly, so drive `t` by hand rather than via fake timers.
+    function makeScheduler(opts?: { keepaliveMs?: number }) {
+      let t = 1000000;
+      const adapter2 = new MockAdapter();
+      const s = new Scheduler(adapter2, cfg, {
+        fps: 10,
+        now: () => t,
+        ...(opts?.keepaliveMs !== undefined ? { keepaliveMs: opts.keepaliveMs } : {}),
+      });
+      // applyFrame resolves immediately, but the scheduler clears its
+      // inFlight guard on a microtask; flush it after each tick so the
+      // next keepalive re-send isn't blocked.
+      const advance = async (ms: number, stepMs = 100) => {
+        for (let elapsed = 0; elapsed < ms; elapsed += stepMs) {
+          t += stepMs;
+          (s as unknown as { tick(): void }).tick();
+          await Promise.resolve();
+          await Promise.resolve();
+        }
+      };
+      return { s, adapter: adapter2, advance };
+    }
+
+    it('re-emits a steady frame after the keepalive interval elapses', async () => {
+      const { s, adapter: a, advance } = makeScheduler({ keepaliveMs: 5000 });
+      s.setState('ready');
+      await advance(100);
+      expect(a.frames.length).toBe(1);
+
+      // Below the interval: still coalesced to the single frame.
+      await advance(4000);
+      expect(a.frames.length).toBe(1);
+
+      // Past the interval: one keepalive re-send of the same steady frame.
+      await advance(1100);
+      expect(a.frames.length).toBe(2);
+      expect(a.frames[1]!.rgb).toEqual(a.frames[0]!.rgb);
+    });
+
+    it('keeps re-sending on each subsequent interval', async () => {
+      const { s, adapter: a, advance } = makeScheduler({ keepaliveMs: 5000 });
+      s.setState('ready');
+      await advance(100);
+      await advance(15000);
+      // ~3 keepalive windows elapsed → initial + 3 re-sends.
+      expect(a.frames.length).toBe(4);
+    });
+
+    it('honors keepaliveMs: 0 (disabled — pure coalescing)', async () => {
+      const { s, adapter: a, advance } = makeScheduler({ keepaliveMs: 0 });
+      s.setState('ready');
+      await advance(100);
+      expect(a.frames.length).toBe(1);
+      await advance(30000);
+      expect(a.frames.length).toBe(1);
+    });
+  });
+
   describe('adapter failure handling', () => {
     it('calls onError on adapter failure', async () => {
       const errors: unknown[] = [];
