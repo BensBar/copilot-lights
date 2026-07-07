@@ -8,8 +8,9 @@ import AppKit
 struct GlowingCopilotMark: View {
     /// Hex color string (e.g. "#4ade80"). Falls back to gray on parse failure.
     let colorHex: String
-    /// 0–100. Scales glow intensity (not the mark's opacity — the mark stays
-    /// fully opaque so the silhouette reads cleanly at any state).
+    /// 0–100. Both scales the glow intensity AND darkens the mark's fill to the
+    /// shade the physical bulb emits at this brightness, so the orb matches the
+    /// light's color and shade exactly.
     let brightness: Int
     /// Diameter of the mark in points. The glow extends beyond this.
     let size: CGFloat
@@ -20,7 +21,10 @@ struct GlowingCopilotMark: View {
     /// frowns on error, matching the menu-bar icon.
     let state: String
 
-    private var tint: NSColor {
+    /// Full-saturation hue used for the ambient glow halo. The glow reads as
+    /// the light spilling into the air, so it keeps the pure hue and conveys
+    /// brightness through opacity (see `glowOpacity`) rather than darkening.
+    private var glowHue: NSColor {
         let base: Color
         if online, let parsed = Color(hex: colorHex) {
             base = parsed
@@ -30,7 +34,23 @@ struct GlowingCopilotMark: View {
         return NSColor(base)
     }
 
-    private var tintSwiftUI: Color { Color(nsColor: tint) }
+    /// The mark's fill: the *emitted shade* the bulb actually produces =
+    /// hue scaled by brightness. This is what makes the on-screen widget and
+    /// the physical light share the exact same color and shade.
+    private var tint: NSColor {
+        guard online, let parsed = RGBColor.fromHex(colorHex) else {
+            return NSColor(Color(white: 0.55))
+        }
+        let shade = parsed.scaled(byBrightness: brightness)
+        return NSColor(
+            srgbRed: CGFloat(shade.r) / 255.0,
+            green: CGFloat(shade.g) / 255.0,
+            blue: CGFloat(shade.b) / 255.0,
+            alpha: 1.0
+        )
+    }
+
+    private var tintSwiftUI: Color { Color(nsColor: glowHue) }
 
     /// Glow opacity scales with brightness so dim states (`ready` at 30%)
     /// don't bloom as aggressively as bright ones (`error` at 85%, `awaiting`
