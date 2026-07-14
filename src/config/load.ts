@@ -74,7 +74,44 @@ export function defaultConfigPath(override?: string): string {
   return resolve(homedir(), '.copilot-lights', 'config.json');
 }
 
-function resolveEnvRefs(obj: unknown): unknown {
+/**
+ * Maps an adapter kind to the top-level config block that holds its
+ * (possibly secret-bearing) settings. Only these blocks are scoped by
+ * `skipKeys` — everything else (e.g. `http.token`) always resolves.
+ */
+const ADAPTER_BLOCK_KEY: Record<string, string> = {
+  'home-assistant': 'homeAssistant',
+  hue: 'hue',
+  govee: 'govee',
+};
+
+/**
+ * Derive the set of enabled adapter kinds from the raw (pre-schema) config,
+ * mirroring the schema's precedence: the multi-adapter `adapters` array wins
+ * when present and non-empty, otherwise the single `adapter` field. `mock` is
+ * dropped when any real backend is present; an empty result means mock-only.
+ */
+function enabledAdaptersFromRaw(raw: unknown): Set<string> {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  const rawAdapters = obj.adapters;
+  const list =
+    Array.isArray(rawAdapters) && rawAdapters.length > 0
+      ? rawAdapters
+      : [obj.adapter ?? 'mock'];
+  const kinds = list.filter((a): a is string => typeof a === 'string');
+  const real = kinds.filter((a) => a !== 'mock');
+  return new Set(real.length > 0 ? real : ['mock']);
+}
+
+/**
+ * Resolve `env:`/`keychain:` references throughout the config. `skipKeys`
+ * names top-level keys whose subtrees are left untouched (raw), so that a
+ * disabled adapter's block never forces resolution of a secret that may be
+ * missing or unreadable (e.g. a Keychain item absent over SSH). Skipping is
+ * top-level only: recursion drops `skipKeys` so nested keys of the same name
+ * are unaffected.
+ */
+function resolveEnvRefs(obj: unknown, skipKeys?: Set<string>): unknown {
   if (typeof obj === 'string') {
     if (obj.startsWith('env:')) {
       const varName = obj.slice(4);
@@ -96,7 +133,9 @@ function resolveEnvRefs(obj: unknown): unknown {
     }
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
-      result[key] = resolveEnvRefs(value);
+      // Leave disabled adapters' blocks raw — their secrets must not be
+      // resolved just because the block exists on disk.
+      result[key] = skipKeys?.has(key) ? value : resolveEnvRefs(value);
     }
     return result;
   }
@@ -108,7 +147,18 @@ async function loadConfigFromPath(path: string): Promise<LoadResult | null> {
   try {
     const content = await readFile(path, 'utf-8');
     const parsed = JSON.parse(content);
-    const resolved = resolveEnvRefs(parsed);
+
+    // Only resolve secrets for adapters that are actually enabled. A disabled
+    // backend's block (e.g. a leftover Home Assistant `token: keychain:...`)
+    // must never break config loading — otherwise unchecking it in the UI
+    // wouldn't fully neutralize it.
+    const enabled = enabledAdaptersFromRaw(parsed);
+    const skipKeys = new Set<string>();
+    for (const [kind, blockKey] of Object.entries(ADAPTER_BLOCK_KEY)) {
+      if (!enabled.has(kind)) skipKeys.add(blockKey);
+    }
+
+    const resolved = resolveEnvRefs(parsed, skipKeys);
     const config = ConfigSchema.parse(resolved);
 
     if (!config.socketPath) {

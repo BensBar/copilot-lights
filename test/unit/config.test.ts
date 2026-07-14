@@ -289,6 +289,82 @@ describe('loadConfig', () => {
     await expect(loadConfig(configPath)).rejects.toThrow(/NOPE/);
   });
 
+  it('does NOT resolve secrets for a disabled adapter block (single adapter)', async () => {
+    const tmpDir = tmpdir();
+    const configPath = resolve(tmpDir, 'test-config-disabled-ha.json');
+
+    delete process.env.CL_DISABLED_MISSING;
+
+    // Govee is the active adapter; a leftover Home Assistant block references a
+    // missing env var. Because HA is disabled, its secret must not be resolved,
+    // so loading succeeds and the raw ref is preserved.
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        adapter: 'govee',
+        govee: { devices: [{ ip: '192.168.4.34' }] },
+        homeAssistant: {
+          baseUrl: 'http://localhost:8123',
+          token: 'env:CL_DISABLED_MISSING',
+          entities: ['light.x'],
+        },
+      })
+    );
+
+    const result = await loadConfig(configPath);
+    expect(result.config.adapter).toBe('govee');
+    // Raw, unresolved — the disabled block was skipped.
+    expect(result.config.homeAssistant!.token).toBe('env:CL_DISABLED_MISSING');
+  });
+
+  it('does NOT resolve secrets for an adapter absent from the adapters[] array', async () => {
+    const tmpDir = tmpdir();
+    const configPath = resolve(tmpDir, 'test-config-disabled-ha-array.json');
+
+    delete process.env.CL_DISABLED_MISSING2;
+
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        adapter: 'home-assistant', // single field points at HA...
+        adapters: ['govee'], // ...but the multi-adapter array wins and omits it
+        govee: { devices: [{ ip: '192.168.4.34' }] },
+        homeAssistant: {
+          baseUrl: 'http://localhost:8123',
+          token: 'env:CL_DISABLED_MISSING2',
+          entities: ['light.x'],
+        },
+      })
+    );
+
+    const result = await loadConfig(configPath);
+    expect(result.config.homeAssistant!.token).toBe('env:CL_DISABLED_MISSING2');
+  });
+
+  it('STILL resolves secrets for an enabled adapter listed in adapters[]', async () => {
+    const tmpDir = tmpdir();
+    const configPath = resolve(tmpDir, 'test-config-enabled-ha-array.json');
+
+    process.env.HASS_TOKEN = 'secret-token-456';
+
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        adapter: 'mock',
+        adapters: ['govee', 'home-assistant'],
+        govee: { devices: [{ ip: '192.168.4.34' }] },
+        homeAssistant: {
+          baseUrl: 'http://localhost:8123',
+          token: 'env:HASS_TOKEN',
+          entities: ['light.x'],
+        },
+      })
+    );
+
+    const result = await loadConfig(configPath);
+    expect(result.config.homeAssistant!.token).toBe('secret-token-456');
+  });
+
   it('returns defaults with sourcePath=null when no config found', async () => {
     delete process.env.COPILOT_LIGHTS_CONFIG;
     delete process.env.XDG_CONFIG_HOME;
