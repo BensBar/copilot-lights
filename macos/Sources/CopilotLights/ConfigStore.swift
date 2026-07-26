@@ -96,13 +96,28 @@ final class ConfigStore: ObservableObject {
                 if case .ready = state {
                     conn.send(content: Data(line.utf8), completion: .contentProcessed { err in
                         if err != nil { finish(nil); return }
-                        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, _ in
-                            if let d = data, let s = String(data: d, encoding: .utf8) {
-                                finish(s.trimmingCharacters(in: .whitespacesAndNewlines))
-                            } else {
-                                finish(nil)
+                        // The daemon sends one newline-terminated JSON line per
+                        // connection, but large replies (status with many
+                        // sessions, scans with many devices) span multiple socket
+                        // read chunks. Accumulate until the newline arrives (or
+                        // the connection closes) so we never decode a partial line.
+                        let acc = ByteAccumulator()
+                        func receiveMore() {
+                            conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, _ in
+                                if let d = data, !d.isEmpty { acc.append(d) }
+                                if let lineData = acc.takeFirstLine() {
+                                    finish(String(data: lineData, encoding: .utf8))
+                                    return
+                                }
+                                if isComplete {
+                                    let buffered = acc.snapshot()
+                                    finish(buffered.isEmpty ? nil : String(data: buffered, encoding: .utf8))
+                                    return
+                                }
+                                receiveMore()
                             }
                         }
+                        receiveMore()
                     })
                 }
             }
@@ -294,4 +309,38 @@ private func mergedDocDictionary(_ raw: [String: Any]) -> [String: Any] {
     ]
     for (k, v) in raw { out[k] = v }
     return out
+}
+
+/// Thread-safe accumulator for bytes received across multiple NWConnection
+/// `receive` callbacks in `ConfigStore.sendOneShot`. A one-shot reply
+/// (status, or a scan carrying many devices) can span several TCP
+/// segments, so we append each chunk and only decode once a complete
+/// newline-terminated line has arrived. Kept local to ConfigStore since
+/// the streaming DaemonClient uses its own buffering.
+private final class ByteAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock(); defer { lock.unlock() }
+        data.append(chunk)
+    }
+
+    /// If the buffer holds a complete newline-terminated line, remove and
+    /// return the bytes before the first newline (newline dropped);
+    /// otherwise return nil and keep buffering.
+    func takeFirstLine() -> Data? {
+        lock.lock(); defer { lock.unlock() }
+        guard let newlineIndex = data.firstIndex(of: 0x0A) else { return nil }
+        let line = data[data.startIndex..<newlineIndex]
+        data = Data(data[data.index(after: newlineIndex)..<data.endIndex])
+        return Data(line)
+    }
+
+    /// Current buffered bytes without mutating — used to salvage a reply
+    /// that arrived without a trailing newline before the socket closed.
+    func snapshot() -> Data {
+        lock.lock(); defer { lock.unlock() }
+        return data
+    }
 }
