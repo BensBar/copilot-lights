@@ -138,6 +138,32 @@ describe('Govee adapter', () => {
       expect(socket.closed).toBe(true);
     });
 
+    it('discover() stays within its timeout when sends never complete', async () => {
+      // Models an unroutable network: the OS accepts each datagram but the
+      // completion callback stalls. A sweep wave is 1 + 2x|targets| sends, so
+      // awaiting it unbounded would run far past the caller's window.
+      class HangingSocket extends FakeSocket {
+        send(msg: Buffer, port: number, ip: string, _cb?: (err: Error | null) => void): void {
+          this.sent.push({ msg: Buffer.from(msg), port, ip });
+          // Deliberately never invoke the callback.
+        }
+      }
+      const hanging = new HangingSocket();
+      adapter = new GoveeAdapter(
+        { devices: [{ ip: '10.0.0.5' }], discoveryTimeoutMs: 0 },
+        { socketFactory: () => hanging as any }
+      );
+      await adapter.connect();
+
+      const started = Date.now();
+      const found = await adapter.discover(100);
+      const elapsed = Date.now() - started;
+
+      expect(Array.isArray(found)).toBe(true);
+      expect(elapsed).toBeLessThan(1500);
+      await adapter.close();
+    });
+
     it('applyFrame sends turn → color → brightness to each device', async () => {
       adapter = new GoveeAdapter(
         { devices: [{ ip: '10.0.0.5' }, { ip: '10.0.0.6' }], discoveryTimeoutMs: 0 },
