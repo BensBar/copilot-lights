@@ -434,9 +434,15 @@ export class Daemon {
       } else if (msg.kind === 'query') {
         if (msg.query === 'goveeScan') {
           const scanTimeoutMs = msg.timeoutMs ?? 3000;
-          // The default 1s idle timeout would destroy the socket before the
-          // discovery window closes; extend it to cover the scan plus slack.
-          socket.setTimeout(scanTimeoutMs + 2000);
+          // Disable the idle timeout for the duration of the scan. A wall-clock
+          // guess (scan window + slack) is not safe: the discovery path also
+          // binds a socket and, when multicast yields nothing, sweeps every
+          // host in the local /24s. On a network where those sends are slow to
+          // fail (no route — CI runners, VPN-only hosts) that overruns any
+          // fixed budget, the idle timer destroys the connection, and the
+          // client sees an empty reply instead of an envelope. The promise
+          // below always settles and always ends the socket.
+          socket.setTimeout(0);
           this.handleGoveeScan(scanTimeoutMs)
             .then((result) => {
               socket.end(JSON.stringify(result) + '\n');
@@ -453,7 +459,8 @@ export class Daemon {
               );
             });
         } else if (msg.query === 'hueScan') {
-          socket.setTimeout(8000);
+          // See the goveeScan note: bounded by the handler, not by an idle timer.
+          socket.setTimeout(0);
           this.handleHueScan()
             .then((result) => socket.end(JSON.stringify(result) + '\n'))
             .catch((err) =>
@@ -466,7 +473,8 @@ export class Daemon {
               )
             );
         } else if (msg.query === 'haScan') {
-          socket.setTimeout(8000);
+          // See the goveeScan note: bounded by the handler, not by an idle timer.
+          socket.setTimeout(0);
           this.handleHaScan()
             .then((result) => socket.end(JSON.stringify(result) + '\n'))
             .catch((err) =>
