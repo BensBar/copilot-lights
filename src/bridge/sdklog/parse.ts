@@ -63,6 +63,12 @@ function toMs(iso: string | undefined): number | undefined {
  * recognized event marker. Only the event name + session UUID are extracted.
  */
 export function parseSdkLogLine(line: string): SdkLogEvent | null {
+  // Fast reject before running two backtracking regexes. Both marker forms
+  // ("Forwarding event for session …" / "Broadcasting session lifecycle
+  // event: …") contain the literal "session", so this guard is lossless — and
+  // on a real log it skips ~91% of lines, which dominates the tailer's cost.
+  if (!line.includes('session')) return null;
+
   const fwd = FORWARD_RE.exec(line);
   if (fwd) {
     return { ts: toMs(fwd[1]), sessionId: fwd[2]!, name: fwd[3]! };
