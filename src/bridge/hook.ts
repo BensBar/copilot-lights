@@ -77,16 +77,17 @@ export function resolveOrigin(env: NodeJS.ProcessEnv = process.env): string | un
 }
 
 /**
- * Parse a timestamp (ISO 8601) into milliseconds since epoch.
- * Fallback to now() if missing or invalid.
+ * Parse a hook `timestamp` into milliseconds since epoch.
+ *
+ * The Copilot SDK hook contract (`BaseHookInput.timestamp`) supplies a numeric
+ * epoch-millisecond value. We also accept an ISO 8601 string for backward
+ * compatibility (older payloads / VS Code-compat surfaces). Falls back to
+ * `nowMs` when missing or unparseable.
  */
-function parseTimestamp(isoString: string | undefined, nowMs: number): number {
-  if (!isoString) return nowMs;
-  try {
-    return new Date(isoString).getTime();
-  } catch {
-    return nowMs;
-  }
+function parseTimestamp(value: string | number | undefined, nowMs: number): number {
+  if (value === undefined || value === null) return nowMs;
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? nowMs : ms;
 }
 
 /**
@@ -113,19 +114,19 @@ export async function runHook(args: HookInput): Promise<void> {
     // Invalid JSON → ignore, continue with empty payload
   }
 
-  // Extract fields (snake_case from stdin, converted to camelCase)
+  // Extract fields from the Copilot SDK hook payload.
   // sessionId resolution order:
-  //   1. payload.session_id (if Copilot supplies it — current shape unknown)
-  //   2. payload.sessionId (camelCase variant)
+  //   1. payload.sessionId  — the SDK's `BaseHookInput.sessionId` (camelCase).
+  //   2. payload.session_id — legacy snake_case fallback for older payloads.
   //   3. cwd-derived synthetic id (`_cwd:<path>`) — gives different workspaces
   //      distinct buckets so a busy session in workspace A doesn't keep a
   //      stale "thinking" entry alive for an idle session in workspace B.
   //   4. final fallback `_unknown`.
   const rawSessionId =
-    (payload.session_id as string | undefined) ??
     (payload.sessionId as string | undefined) ??
+    (payload.session_id as string | undefined) ??
     undefined;
-  const timestamp = parseTimestamp(payload.timestamp as string | undefined, nowMs);
+  const timestamp = parseTimestamp(payload.timestamp as string | number | undefined, nowMs);
   const toolName = (payload.tool_name as string | undefined) ?? undefined;
   const notificationType = (payload.notification_type as string | undefined) ?? undefined;
   // Prefer payload.cwd if Copilot supplies it; otherwise capture the hook

@@ -246,6 +246,48 @@ describe('runHook', () => {
     expect(elapsed).toBeLessThan(800);
   });
 
+  it('runHook accepts the current SDK shape (camelCase sessionId + numeric timestamp)', async () => {
+    // Matches Copilot's BaseHookInput: { sessionId, timestamp(number ms), cwd }.
+    const stdin = JSON.stringify({
+      sessionId: 'sess-sdk',
+      timestamp: 1704067200000,
+      cwd: '/tmp/ws',
+      source: 'startup',
+    });
+
+    await runHook({
+      event: 'SessionStart',
+      stdin,
+      socketPath,
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(receivedMessages).toHaveLength(1);
+    const msg = receivedMessages[0];
+
+    expect(msg.sessionId).toBe('sess-sdk');
+    expect(msg.ts).toBe(1704067200000);
+  });
+
+  it('runHook prefers camelCase sessionId over legacy snake_case', async () => {
+    const stdin = JSON.stringify({
+      sessionId: 'camel',
+      session_id: 'snake',
+    });
+
+    await runHook({
+      event: 'UserPromptSubmit',
+      stdin,
+      socketPath,
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(receivedMessages).toHaveLength(1);
+    expect(receivedMessages[0].sessionId).toBe('camel');
+  });
+
   it('runHook converts ISO timestamp to milliseconds', async () => {
     const stdin = JSON.stringify({
       session_id: 'sess-456',
