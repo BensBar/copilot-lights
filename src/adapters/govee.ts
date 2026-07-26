@@ -436,11 +436,33 @@ export class GoveeAdapter implements LightAdapter {
       const deadline = this.now() + Math.max(0, timeoutMs);
       const stopFiringAt = deadline - 500;
       const waveSpacingMs = 700;
-      await fireWave();
+
+      // A wave is 1 + 2×|targets| sends (500+ on a single /24). On a network
+      // where those sends are slow to fail because there's no route, awaiting
+      // the whole wave can take seconds — far past `timeoutMs`, breaking the
+      // latency contract above and any budget a caller sized around it. Cap
+      // every wave at the remaining window. Sends still in flight are harmless:
+      // their callbacks just resolve after we've stopped listening.
+      const capped = async (p: Promise<void>): Promise<void> => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            p,
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, Math.max(0, deadline - this.now()));
+              (timer as unknown as { unref?: () => void }).unref?.();
+            }),
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      };
+
+      await capped(fireWave());
       while (this.now() < deadline) {
         const remaining = deadline - this.now();
         await new Promise((r) => setTimeout(r, Math.min(waveSpacingMs, remaining)));
-        if (this.now() < stopFiringAt) await fireWave();
+        if (this.now() < stopFiringAt) await capped(fireWave());
       }
     } finally {
       this.socket.removeListener('message', onMessage);
